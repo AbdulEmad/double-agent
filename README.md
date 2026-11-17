@@ -1,16 +1,14 @@
 # double-agent
 
-An open source runtime that keeps an AI agent alive between events. It wakes the agent on webhooks and timers, survives crashes, waits for humans to approve risky actions, and keeps the agent within a budget.
-
-> **Status:** early development. Nothing below works yet; this README describes what v1 will do.
+An open source runtime for always-on agents: AI agents that stay alive between events. It wakes the agent on webhooks and timers, survives crashes, waits for humans to approve risky actions, and keeps the agent within a budget.
 
 ## Why
 
-An agent that runs once and exits is easy. An agent that runs for weeks is not: it has to remember what it was doing, wake itself up later, keep going after a crash without repeating actions, and stop before it spends too much or does something it shouldn't.
+An agent that runs once and exits is easy. An always-on agent that runs for weeks is not: it has to remember what it was doing, wake itself up later, keep going after a crash without repeating actions, and stop before it spends too much or does something it shouldn't.
 
-double-agent follows the inbox, timers, memory, permissions and outbox model from Anthropic's guide to always-on agents, and adds budgets and a run timeline on top.
+double-agent builds always-on agents from five parts: an inbox, timers, memory, permissions and an outbox. It adds budgets and a run timeline on top.
 
-## What v1 will do
+## What it will do
 
 - **Inbox:** events from webhooks and timers land in a per-agent inbox. Duplicate deliveries are ignored, and one worker per agent processes events one run at a time.
 - **Crash recovery:** the session transcript is saved after every step. Kill the process mid-run, restart it, and the run resumes without repeating a completed action.
@@ -22,7 +20,7 @@ double-agent follows the inbox, timers, memory, permissions and outbox model fro
 - **Memory:** file-based memory with an index loaded on every run, and per-task progress notes.
 - **Run timeline:** a CLI view that shows why each run woke, what it did and what it cost.
 
-Out of scope for v1: distributed workers, multi-tenancy, a web dashboard and step-level replay.
+Out of scope: distributed workers, multi-tenancy, a web dashboard and step-level replay.
 
 ## Tech stack
 
@@ -37,7 +35,7 @@ Python 3.12+ and asyncio, SQLite (WAL mode) via `aiosqlite`, FastAPI and `uvicor
 5. Safety and budgets
 6. Memory
 7. CLI control plane and timeline
-8. Example agents and launch
+8. Example always-on agents and launch
 
 ## Licence
 
