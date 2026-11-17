@@ -39,4 +39,4 @@ Python 3.12+ and asyncio, SQLite (WAL mode) via `aiosqlite`, FastAPI and `uvicor
 
 ## Licence
 
-Not chosen yet.
+MIT. See [LICENSE](LICENSE).
