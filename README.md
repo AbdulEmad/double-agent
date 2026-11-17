@@ -1,14 +1,14 @@
 # double-agent
 
-An open source runtime that keeps an AI agent alive between events. It wakes the agent on webhooks and timers, survives crashes, waits for humans to approve risky actions, and keeps the agent within a budget.
+An open source runtime for always-on agents: AI agents that stay alive between events. It wakes the agent on webhooks and timers, survives crashes, waits for humans to approve risky actions, and keeps the agent within a budget.
 
 > **Status:** early development. Nothing below works yet; this README describes what v1 will do.
 
 ## Why
 
-An agent that runs once and exits is easy. An agent that runs for weeks is not: it has to remember what it was doing, wake itself up later, keep going after a crash without repeating actions, and stop before it spends too much or does something it shouldn't.
+An agent that runs once and exits is easy. An always-on agent that runs for weeks is not: it has to remember what it was doing, wake itself up later, keep going after a crash without repeating actions, and stop before it spends too much or does something it shouldn't.
 
-double-agent follows the inbox, timers, memory, permissions and outbox model from Anthropic's guide to always-on agents, and adds budgets and a run timeline on top.
+double-agent builds always-on agents from five parts: an inbox, timers, memory, permissions and an outbox. It adds budgets and a run timeline on top.
 
 ## What v1 will do
 
@@ -37,7 +37,7 @@ Python 3.12+ and asyncio, SQLite (WAL mode) via `aiosqlite`, FastAPI and `uvicor
 5. Safety and budgets
 6. Memory
 7. CLI control plane and timeline
-8. Example agents and launch
+8. Example always-on agents and launch
 
 ## Licence
 
