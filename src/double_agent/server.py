@@ -36,6 +36,12 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
     ids = [a.id for a in agents]
     if len(set(ids)) != len(ids):
         raise ValueError(f"Agent ids must be unique: {ids}")
+    for agent in agents:
+        if agent.approval_channel and agent.approval_channel not in agent.channels:
+            raise ValueError(
+                f"Agent {agent.id}: approval_channel {agent.approval_channel!r} is not one of "
+                "its channels"
+            )
     storage = await SqliteStorage.open(db_path)
     workers: dict[str, Worker] = {}
 
@@ -49,7 +55,7 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
         builtins = timer_tools(storage, on_change=scheduler.wake)
         if agent.channels:
             builtins.append(send_message_tool(list(agent.channels), storage, dispatcher.wake))
-        workers[agent.id] = Worker(agent, storage, builtins)
+        workers[agent.id] = Worker(agent, storage, builtins, on_queue=dispatcher.wake)
     await sync_schedules(storage, agents)
     server = uvicorn.Server(uvicorn.Config(create_app(storage, workers), host=host, port=port))
     tasks = [asyncio.create_task(w.run_forever()) for w in workers.values()]

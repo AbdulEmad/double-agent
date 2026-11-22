@@ -34,6 +34,8 @@ class Event(BaseModel):
 
 class RunStatus(StrEnum):
     RUNNING = "running"
+    # Paused on a tool call that needs a human's approval. Does not block the agent's other runs.
+    AWAITING_APPROVAL = "awaiting_approval"
     FINISHED = "finished"
 
 
@@ -93,4 +95,23 @@ class OutboxItem(BaseModel):
     status: OutboxStatus = OutboxStatus.PENDING
     attempts: int = 0
     last_error: str | None = None
+    created_at: AwareDatetime = Field(default_factory=_now)
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+class Approval(BaseModel):
+    """A request for a human to allow or refuse one tool call."""
+
+    id: str
+    agent_id: str
+    run_id: str
+    tool_name: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    reason: str | None = None
     created_at: AwareDatetime = Field(default_factory=_now)
