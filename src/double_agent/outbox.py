@@ -1,36 +1,71 @@
-from collections.abc import Awaitable, Callable
+import hashlib
+import hmac
+import json
+from pathlib import Path
 from typing import Protocol
 
-from double_agent.types import OutboxItem, OutboxStatus
+import httpx
 
-Sender = Callable[[OutboxItem], Awaitable[None]]
+from double_agent.types import OutboxItem
 
 
-class Outbox(Protocol):
-    async def enqueue(self, item: OutboxItem) -> bool:
-        """Queue an item. Returns False if its dedupe key was already queued."""
+class Channel(Protocol):
+    """Somewhere an agent can send messages, such as a webhook or a file."""
+
+    async def send(self, item: OutboxItem) -> None:
+        """Deliver one message. Raise to have the dispatcher retry later."""
         ...
 
-    async def dispatch(self, send: Sender) -> int:
-        """Send every pending item and mark it sent. Returns how many were sent."""
-        ...
+
+def _payload(item: OutboxItem) -> dict[str, str]:
+    return {
+        "id": item.id,
+        "agent_id": item.agent_id,
+        "channel": item.channel,
+        "body": item.body,
+        "created_at": item.created_at.isoformat(),
+    }
 
 
-class InMemoryOutbox:
-    def __init__(self) -> None:
-        self._items: dict[str, OutboxItem] = {}
+def signature(secret: str, body: bytes) -> str:
+    """The `X-Double-Agent-Signature` value for a request body: `sha256=<hex HMAC>`."""
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
-    async def enqueue(self, item: OutboxItem) -> bool:
-        if item.dedupe_key in self._items:
-            return False
-        self._items[item.dedupe_key] = item
-        return True
 
-    async def dispatch(self, send: Sender) -> int:
-        sent = 0
-        for item in self._items.values():
-            if item.status == OutboxStatus.PENDING:
-                await send(item)
-                item.status = OutboxStatus.SENT
-                sent += 1
-        return sent
+class WebhookChannel:
+    """POSTs each message as JSON.
+
+    Every request carries an `Idempotency-Key` header with the message id. A message can be
+    sent again after a crash, so receivers should ignore keys they have already seen. With a
+    `secret`, requests are also signed so the receiver can check where they came from.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        secret: str | None = None,
+        timeout: float = 10.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self.url = url
+        self.secret = secret
+        self._client = client or httpx.AsyncClient(timeout=timeout)
+
+    async def send(self, item: OutboxItem) -> None:
+        body = json.dumps(_payload(item)).encode()
+        headers = {"Content-Type": "application/json", "Idempotency-Key": item.id}
+        if self.secret:
+            headers["X-Double-Agent-Signature"] = signature(self.secret, body)
+        response = await self._client.post(self.url, content=body, headers=headers)
+        response.raise_for_status()
+
+
+class FileChannel:
+    """Appends each message to a file as one JSON line. Useful for demos and local testing."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    async def send(self, item: OutboxItem) -> None:
+        with self.path.open("a") as f:
+            f.write(json.dumps(_payload(item)) + "\n")

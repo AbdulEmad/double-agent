@@ -23,3 +23,11 @@ If the process is down through several ticks of a recurring timer, it fires once
 ## Timers carry their own time zone
 
 A recurring timer's cron expression is read in the timer's time zone (default UTC), so "every day at 9:00" follows daylight saving changes. All times are stored in UTC.
+
+## Messages are delivered at least once
+
+A message is marked sent only after its channel accepts it. If the process crashes in between, the message is sent again on restart. Every delivery carries the message id as an `Idempotency-Key`, so receivers can drop repeats. The alternative, never resending, could silently lose messages.
+
+## Agents send only to configured channels
+
+An agent names a channel from its configuration and never supplies a URL or address. Where each channel delivers is set by whoever runs the agent, so a prompt injection cannot redirect the agent's messages.

@@ -8,7 +8,17 @@ from typing import Any
 
 import aiosqlite
 
-from double_agent.types import Event, EventStatus, Run, RunStatus, Step, Timer, TimerStatus
+from double_agent.types import (
+    Event,
+    EventStatus,
+    OutboxItem,
+    OutboxStatus,
+    Run,
+    RunStatus,
+    Step,
+    Timer,
+    TimerStatus,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -53,6 +63,19 @@ CREATE TABLE IF NOT EXISTS timers (
     status TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS timers_due ON timers (status, due_at);
+
+CREATE TABLE IF NOT EXISTS outbox (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    body TEXT NOT NULL,
+    next_attempt_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    last_error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS outbox_due ON outbox (status, next_attempt_at);
 """
 
 
@@ -270,3 +293,64 @@ class SqliteStorage:
                     "UPDATE timers SET due_at = ? WHERE id = ?", (_ts(next_due_at), timer.id)
                 )
         return True
+
+    async def add_outbox_item(self, item: OutboxItem) -> bool:
+        async with self._lock:
+            cursor = await self._db.execute(
+                "INSERT INTO outbox VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                (
+                    item.id,
+                    item.agent_id,
+                    item.channel,
+                    item.body,
+                    _ts(item.next_attempt_at),
+                    item.status,
+                    item.attempts,
+                    item.last_error,
+                    _ts(item.created_at),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    async def due_outbox_items(self, now: datetime) -> list[OutboxItem]:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM outbox WHERE status = ? AND next_attempt_at <= ?"
+                " ORDER BY next_attempt_at, created_at",
+                (OutboxStatus.PENDING, _ts(now)),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return [OutboxItem.model_validate(dict(r)) for r in rows]
+
+    async def next_outbox_at(self) -> datetime | None:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT MIN(next_attempt_at) FROM outbox WHERE status = ?", (OutboxStatus.PENDING,)
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+    async def record_delivery(self, item_id: str) -> None:
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE outbox SET status = ? WHERE id = ?", (OutboxStatus.SENT, item_id)
+            )
+
+    async def record_failure(self, item_id: str, error: str, retry_at: datetime | None) -> None:
+        async with self._lock:
+            if retry_at is None:
+                await self._db.execute(
+                    "UPDATE outbox SET attempts = attempts + 1, last_error = ?, status = ?"
+                    " WHERE id = ?",
+                    (error, OutboxStatus.FAILED, item_id),
+                )
+            else:
+                await self._db.execute(
+                    "UPDATE outbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?"
+                    " WHERE id = ?",
+                    (error, _ts(retry_at), item_id),
+                )
