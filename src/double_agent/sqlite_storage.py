@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -56,10 +57,15 @@ def _event(row: aiosqlite.Row) -> Event:
 
 
 class SqliteStorage:
-    """Storage backed by a SQLite file in WAL mode."""
+    """Storage backed by a SQLite file in WAL mode.
+
+    One connection is shared by the API and every worker, so each method holds a lock. Without
+    it, one caller's statement could run inside another caller's open transaction.
+    """
 
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
+        self._lock = asyncio.Lock()
 
     @classmethod
     async def open(cls, path: str | Path) -> "SqliteStorage":
@@ -76,40 +82,45 @@ class SqliteStorage:
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncGenerator[None]:
-        await self._db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            await self._db.execute("ROLLBACK")
-            raise
-        await self._db.execute("COMMIT")
+        async with self._lock:
+            await self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                await self._db.execute("ROLLBACK")
+                raise
+            await self._db.execute("COMMIT")
 
     async def add_event(self, event: Event) -> bool:
-        cursor = await self._db.execute(
-            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT (idempotency_key) DO NOTHING",
-            (
-                event.id,
-                event.agent_id,
-                event.subject,
-                event.source,
-                event.type,
-                json.dumps(event.payload),
-                event.idempotency_key,
-                event.status,
-                _ts(event.created_at),
-            ),
-        )
-        return cursor.rowcount == 1
+        async with self._lock:
+            cursor = await self._db.execute(
+                "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT (idempotency_key) DO NOTHING",
+                (
+                    event.id,
+                    event.agent_id,
+                    event.subject,
+                    event.source,
+                    event.type,
+                    json.dumps(event.payload),
+                    event.idempotency_key,
+                    event.status,
+                    _ts(event.created_at),
+                ),
+            )
+            return cursor.rowcount == 1
 
     async def get_event(self, event_id: str) -> Event | None:
-        async with self._db.execute("SELECT * FROM events WHERE id = ?", (event_id,)) as cursor:
+        async with (
+            self._lock,
+            self._db.execute("SELECT * FROM events WHERE id = ?", (event_id,)) as cursor,
+        ):
             row = await cursor.fetchone()
         return _event(row) if row else None
 
     async def start_next_run(self, agent_id: str) -> Run | None:
         async with self._transaction():
-            if await self.unfinished_run(agent_id):
+            if await self._unfinished_run(agent_id):
                 return None
             async with self._db.execute(
                 "SELECT id FROM events WHERE agent_id = ? AND status = ?"
@@ -130,6 +141,10 @@ class SqliteStorage:
         return run
 
     async def unfinished_run(self, agent_id: str) -> Run | None:
+        async with self._lock:
+            return await self._unfinished_run(agent_id)
+
+    async def _unfinished_run(self, agent_id: str) -> Run | None:
         async with self._db.execute(
             "SELECT * FROM runs WHERE agent_id = ? AND status = ?",
             (agent_id, RunStatus.RUNNING),
@@ -148,15 +163,19 @@ class SqliteStorage:
             )
 
     async def save_step(self, step: Step) -> None:
-        await self._db.execute(
-            "INSERT INTO steps VALUES (?, ?, ?, ?)",
-            (step.run_id, step.index, step.kind, json.dumps(step.data)),
-        )
+        async with self._lock:
+            await self._db.execute(
+                "INSERT INTO steps VALUES (?, ?, ?, ?)",
+                (step.run_id, step.index, step.kind, json.dumps(step.data)),
+            )
 
     async def load_steps(self, run_id: str) -> list[Step]:
-        async with self._db.execute(
-            "SELECT * FROM steps WHERE run_id = ? ORDER BY idx", (run_id,)
-        ) as cursor:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM steps WHERE run_id = ? ORDER BY idx", (run_id,)
+            ) as cursor,
+        ):
             rows = await cursor.fetchall()
         return [
             Step(run_id=r["run_id"], index=r["idx"], kind=r["kind"], data=json.loads(r["data"]))

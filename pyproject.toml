@@ -7,8 +7,10 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
+    "fastapi>=0.165.0",
     "pydantic>=2.14.3",
     "typer>=0.29.1",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -20,6 +22,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-asyncio>=1.5.0",
