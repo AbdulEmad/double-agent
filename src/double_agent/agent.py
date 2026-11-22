@@ -13,6 +13,8 @@ class Tool:
     description: str
     input_schema: dict[str, Any]
     fn: Callable[[dict[str, Any]], Awaitable[str]]
+    # When True, each call waits for a human to approve it before it runs.
+    needs_approval: bool = False
 
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -51,3 +53,5 @@ class Agent:
     schedules: list[Schedule] = field(default_factory=lambda: [])
     # Where the agent can send messages, by name. The agent picks a name; it never sees a URL.
     channels: dict[str, Channel] = field(default_factory=lambda: {})
+    # Which of `channels` is told when a tool call needs approval. None sends no notification.
+    approval_channel: str | None = None

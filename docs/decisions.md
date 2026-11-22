@@ -31,3 +31,11 @@ A message is marked sent only after its channel accepts it. If the process crash
 ## Agents send only to configured channels
 
 An agent names a channel from its configuration and never supplies a URL or address. Where each channel delivers is set by whoever runs the agent, so a prompt injection cannot redirect the agent's messages.
+
+## Paused runs don't block the agent
+
+A run waiting for an approval is set aside rather than left running, so the agent keeps handling other events while a human decides. When the answer comes in, the paused run resumes by replaying its saved steps.
+
+## The CLI talks to the running server
+
+`double-agent approvals` commands call the server's HTTP API rather than writing to the database. Workers only wake when signalled, so a direct database write would not resume a paused run. Set `DOUBLE_AGENT_URL` or `--url` when the server is not on `http://127.0.0.1:8000`.

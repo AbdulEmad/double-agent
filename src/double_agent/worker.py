@@ -7,33 +7,50 @@ from typing import Any
 from double_agent.agent import Agent, Tool, ToolCall, current_tool_call
 from double_agent.model import Message, ModelResponse
 from double_agent.storage import Storage
-from double_agent.types import Run, Step, StepKind
+from double_agent.types import Approval, ApprovalStatus, OutboxItem, Run, Step, StepKind
 
 log = logging.getLogger(__name__)
+
+
+class _Paused(Exception):
+    """Raised inside a run when a tool call is waiting for approval."""
 
 
 class Worker:
     """Runs one agent's events, one run at a time, resuming any run a crash interrupted.
 
     `builtins` are tools every agent gets on top of its own, such as the timer tools.
+    `on_queue` is called after the worker queues a message, such as an approval request.
     """
 
-    def __init__(self, agent: Agent, storage: Storage, builtins: list[Tool] | None = None) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        storage: Storage,
+        builtins: list[Tool] | None = None,
+        on_queue: Callable[[], None] = lambda: None,
+    ) -> None:
         self.agent = agent
         self.storage = storage
         self.tools = [*agent.tools, *(builtins or [])]
+        self.on_queue = on_queue
         self._wake = asyncio.Event()
 
     async def run_pending(self) -> int:
-        """Finish any interrupted run, then run every pending event. Returns runs completed."""
-        completed = 0
-        if run := await self.storage.unfinished_run(self.agent.id):
+        """Work through everything ready to run. Returns how many runs it worked on.
+
+        In order: a run a crash interrupted, paused runs whose approval has been answered, and
+        new events. A run that pauses for approval counts, and is picked up again once answered.
+        """
+        handled = 0
+        while run := (
+            await self.storage.unfinished_run(self.agent.id)
+            or await self.storage.resume_answered_run(self.agent.id)
+            or await self.storage.start_next_run(self.agent.id)
+        ):
             await self.execute(run)
-            completed += 1
-        while run := await self.storage.start_next_run(self.agent.id):
-            await self.execute(run)
-            completed += 1
-        return completed
+            handled += 1
+        return handled
 
     def wake(self) -> None:
         """Check the inbox now. The API and the scheduler call this when they add an event."""
@@ -60,12 +77,46 @@ class Worker:
                 pass
 
     async def execute(self, run: Run) -> None:
-        """Drive a run to completion.
+        """Drive a run until it finishes or pauses for approval.
 
         Every model call and tool call is saved as a step before the run moves on. On resume,
         saved steps are replayed from storage instead of being repeated, so a completed model
         call or tool call never happens twice.
         """
+        try:
+            await self._execute(run)
+        except _Paused:
+            await self.storage.pause_run(run.id)
+            return
+        await self.storage.finish_run(run.id)
+
+    async def _request_approval(self, run: Run, step: int, block: dict[str, Any]) -> Approval:
+        """Get the approval for a tool call, creating and announcing the request if it is new."""
+        approval_id = f"{run.id}:{step}"
+        if approval := await self.storage.get_approval(approval_id):
+            return approval
+        approval = Approval(
+            id=approval_id,
+            agent_id=self.agent.id,
+            run_id=run.id,
+            tool_name=block["name"],
+            input=block["input"],
+        )
+        await self.storage.add_approval(approval)
+        if channel := self.agent.approval_channel:
+            body = (
+                f"Agent {self.agent.id} wants to run {approval.tool_name} with input "
+                f"{json.dumps(approval.input)}. Answer with: double-agent approvals approve "
+                f"{approval_id}, or: double-agent approvals deny {approval_id}"
+            )
+            item = OutboxItem(
+                id=f"approval:{approval_id}", agent_id=self.agent.id, channel=channel, body=body
+            )
+            await self.storage.add_outbox_item(item)
+            self.on_queue()
+        return approval
+
+    async def _execute(self, run: Run) -> None:
         event = await self.storage.get_event(run.event_id)
         assert event is not None
         saved = {s.index: s for s in await self.storage.load_steps(run.id)}
@@ -113,6 +164,13 @@ class Worker:
                     tool = tools.get(block["name"])
                     if tool is None:
                         return {"output": f"Unknown tool: {block['name']}", "is_error": True}
+                    if tool.needs_approval:
+                        approval = await self._request_approval(run, index, block)
+                        if approval.status == ApprovalStatus.PENDING:
+                            raise _Paused
+                        if approval.status == ApprovalStatus.DENIED:
+                            reason = f": {approval.reason}" if approval.reason else "."
+                            return {"output": f"Denied by the user{reason}", "is_error": True}
                     token = current_tool_call.set(ToolCall(self.agent.id, run.id, index))
                     try:
                         return {"output": await tool.fn(block["input"]), "is_error": False}
@@ -131,5 +189,3 @@ class Worker:
                     }
                 )
             messages.append(Message(role="user", content=results))
-
-        await self.storage.finish_run(run.id)

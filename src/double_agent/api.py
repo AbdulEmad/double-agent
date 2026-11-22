@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from double_agent.storage import Storage
-from double_agent.types import Event
+from double_agent.types import Approval, Event
 from double_agent.worker import Worker
 
 
@@ -21,6 +21,11 @@ class EventAccepted(BaseModel):
     duplicate: bool
 
 
+class ApprovalAnswer(BaseModel):
+    approve: bool
+    reason: str | None = None
+
+
 def create_app(storage: Storage, workers: dict[str, Worker]) -> FastAPI:
     app = FastAPI(title="double-agent")
 
@@ -35,5 +40,22 @@ def create_app(storage: Storage, workers: dict[str, Worker]) -> FastAPI:
             return EventAccepted(duplicate=True)
         worker.wake()
         return EventAccepted(duplicate=False)
+
+    @app.get("/approvals")
+    async def list_approvals() -> list[Approval]:
+        """Every agent's approval requests that are waiting for an answer."""
+        return await storage.pending_approvals()
+
+    @app.post("/approvals/{approval_id}")
+    async def answer_approval(approval_id: str, body: ApprovalAnswer) -> Approval:
+        """Approve or deny a pending request. The paused run resumes straight away."""
+        answered = await storage.answer_approval(approval_id, body.approve, body.reason)
+        if answered is None:
+            if await storage.get_approval(approval_id) is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"No approval {approval_id}")
+            raise HTTPException(status.HTTP_409_CONFLICT, f"Approval {approval_id} is answered")
+        if worker := workers.get(answered.agent_id):
+            worker.wake()
+        return answered
 
     return app

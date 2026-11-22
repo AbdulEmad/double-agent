@@ -2,6 +2,8 @@ from datetime import datetime
 from typing import Protocol
 
 from double_agent.types import (
+    Approval,
+    ApprovalStatus,
     Event,
     EventStatus,
     OutboxItem,
@@ -29,7 +31,18 @@ class Storage(Protocol):
         ...
 
     async def unfinished_run(self, agent_id: str) -> Run | None:
-        """Return the agent's run that started but did not finish, if any."""
+        """Return the agent's running run, if any. Runs awaiting approval are not included."""
+        ...
+
+    async def pause_run(self, run_id: str) -> None:
+        """Mark a run as awaiting approval, so the agent can run other events meanwhile."""
+        ...
+
+    async def resume_answered_run(self, agent_id: str) -> Run | None:
+        """Set one of the agent's paused runs running again, if one has an answered approval.
+
+        Does nothing and returns None while the agent has another run in progress.
+        """
         ...
 
     async def finish_run(self, run_id: str) -> None:
@@ -71,6 +84,22 @@ class Storage(Protocol):
         """
         ...
 
+    async def add_approval(self, approval: Approval) -> bool:
+        """Store an approval request. Returns False if one with its id already exists."""
+        ...
+
+    async def get_approval(self, approval_id: str) -> Approval | None: ...
+
+    async def pending_approvals(self) -> list[Approval]:
+        """Return every agent's unanswered approval requests, oldest first."""
+        ...
+
+    async def answer_approval(
+        self, approval_id: str, approved: bool, reason: str | None
+    ) -> Approval | None:
+        """Record a decision on a pending request. Returns None if it is unknown or answered."""
+        ...
+
     async def add_outbox_item(self, item: OutboxItem) -> bool:
         """Queue a message. Returns False if an item with its id is already queued."""
         ...
@@ -99,6 +128,7 @@ class InMemoryStorage:
         self._steps: dict[str, list[Step]] = {}
         self._timers: dict[str, Timer] = {}
         self._outbox: dict[str, OutboxItem] = {}
+        self._approvals: dict[str, Approval] = {}
 
     async def add_event(self, event: Event) -> bool:
         if event.idempotency_key in self._events:
@@ -131,6 +161,25 @@ class InMemoryStorage:
     async def unfinished_run(self, agent_id: str) -> Run | None:
         for run in self._runs.values():
             if run.agent_id == agent_id and run.status == RunStatus.RUNNING:
+                return run.model_copy()
+        return None
+
+    async def pause_run(self, run_id: str) -> None:
+        self._runs[run_id].status = RunStatus.AWAITING_APPROVAL
+
+    async def resume_answered_run(self, agent_id: str) -> Run | None:
+        if await self.unfinished_run(agent_id):
+            return None
+        answered = {
+            a.run_id for a in self._approvals.values() if a.status != ApprovalStatus.PENDING
+        }
+        for run in self._runs.values():
+            if (
+                run.agent_id == agent_id
+                and run.status == RunStatus.AWAITING_APPROVAL
+                and run.id in answered
+            ):
+                run.status = RunStatus.RUNNING
                 return run.model_copy()
         return None
 
@@ -214,3 +263,27 @@ class InMemoryStorage:
 
     def _pending_outbox(self) -> list[OutboxItem]:
         return [i for i in self._outbox.values() if i.status == OutboxStatus.PENDING]
+
+    async def add_approval(self, approval: Approval) -> bool:
+        if approval.id in self._approvals:
+            return False
+        self._approvals[approval.id] = approval.model_copy()
+        return True
+
+    async def get_approval(self, approval_id: str) -> Approval | None:
+        approval = self._approvals.get(approval_id)
+        return approval.model_copy() if approval else None
+
+    async def pending_approvals(self) -> list[Approval]:
+        pending = [a for a in self._approvals.values() if a.status == ApprovalStatus.PENDING]
+        return [a.model_copy() for a in sorted(pending, key=lambda a: a.created_at)]
+
+    async def answer_approval(
+        self, approval_id: str, approved: bool, reason: str | None
+    ) -> Approval | None:
+        approval = self._approvals.get(approval_id)
+        if approval is None or approval.status != ApprovalStatus.PENDING:
+            return None
+        approval.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
+        approval.reason = reason
+        return approval.model_copy()

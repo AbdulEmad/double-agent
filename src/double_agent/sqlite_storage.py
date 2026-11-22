@@ -9,6 +9,8 @@ from typing import Any
 import aiosqlite
 
 from double_agent.types import (
+    Approval,
+    ApprovalStatus,
     Event,
     EventStatus,
     OutboxItem,
@@ -76,6 +78,18 @@ CREATE TABLE IF NOT EXISTS outbox (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outbox_due ON outbox (status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES runs (id),
+    tool_name TEXT NOT NULL,
+    input TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS approvals_status ON approvals (status, created_at);
 """
 
 
@@ -88,6 +102,12 @@ def _event(row: aiosqlite.Row) -> Event:
     fields: dict[str, Any] = dict(row)
     fields["payload"] = json.loads(fields["payload"])
     return Event.model_validate(fields)
+
+
+def _approval(row: aiosqlite.Row) -> Approval:
+    fields: dict[str, Any] = dict(row)
+    fields["input"] = json.loads(fields["input"])
+    return Approval.model_validate(fields)
 
 
 class SqliteStorage:
@@ -188,6 +208,29 @@ class SqliteStorage:
         ) as cursor:
             row = await cursor.fetchone()
         return Run.model_validate(dict(row)) if row else None
+
+    async def pause_run(self, run_id: str) -> None:
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE runs SET status = ? WHERE id = ?", (RunStatus.AWAITING_APPROVAL, run_id)
+            )
+
+    async def resume_answered_run(self, agent_id: str) -> Run | None:
+        async with self._transaction():
+            if await self._unfinished_run(agent_id):
+                return None
+            async with self._db.execute(
+                "SELECT * FROM runs WHERE agent_id = ? AND status = ? AND id IN"
+                " (SELECT run_id FROM approvals WHERE status != ?) ORDER BY started_at LIMIT 1",
+                (agent_id, RunStatus.AWAITING_APPROVAL, ApprovalStatus.PENDING),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None
+            await self._db.execute(
+                "UPDATE runs SET status = ? WHERE id = ?", (RunStatus.RUNNING, row["id"])
+            )
+        return Run.model_validate({**dict(row), "status": RunStatus.RUNNING})
 
     async def finish_run(self, run_id: str) -> None:
         async with self._transaction():
@@ -354,3 +397,53 @@ class SqliteStorage:
                     " WHERE id = ?",
                     (error, _ts(retry_at), item_id),
                 )
+
+    async def add_approval(self, approval: Approval) -> bool:
+        async with self._lock:
+            cursor = await self._db.execute(
+                "INSERT INTO approvals VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                (
+                    approval.id,
+                    approval.agent_id,
+                    approval.run_id,
+                    approval.tool_name,
+                    json.dumps(approval.input),
+                    approval.status,
+                    approval.reason,
+                    _ts(approval.created_at),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    async def get_approval(self, approval_id: str) -> Approval | None:
+        async with (
+            self._lock,
+            self._db.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return _approval(row) if row else None
+
+    async def pending_approvals(self) -> list[Approval]:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM approvals WHERE status = ? ORDER BY created_at",
+                (ApprovalStatus.PENDING,),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return [_approval(r) for r in rows]
+
+    async def answer_approval(
+        self, approval_id: str, approved: bool, reason: str | None
+    ) -> Approval | None:
+        status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
+        async with self._lock:
+            cursor = await self._db.execute(
+                "UPDATE approvals SET status = ?, reason = ? WHERE id = ? AND status = ?"
+                " RETURNING *",
+                (status, reason, approval_id, ApprovalStatus.PENDING),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return _approval(row) if row else None
