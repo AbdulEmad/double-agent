@@ -15,3 +15,11 @@ The project is released under the MIT licence.
 ## One event per run
 
 Each run handles a single event. Starting a run claims its event in the same database transaction, so a crash can never leave an event claimed with no run to finish it. The database also allows at most one unfinished run per agent.
+
+## Missed timer ticks fire once
+
+If the process is down through several ticks of a recurring timer, it fires once when the process comes back, then moves to the next tick after the current time. This avoids a burst of catch-up runs after downtime.
+
+## Timers carry their own time zone
+
+A recurring timer's cron expression is read in the timer's time zone (default UTC), so "every day at 9:00" follows daylight saving changes. All times are stored in UTC.

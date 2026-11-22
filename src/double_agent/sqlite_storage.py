@@ -2,13 +2,13 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
-from double_agent.types import Event, EventStatus, Run, RunStatus, Step
+from double_agent.types import Event, EventStatus, Run, RunStatus, Step, Timer, TimerStatus
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -42,12 +42,23 @@ CREATE TABLE IF NOT EXISTS steps (
     data TEXT NOT NULL,
     PRIMARY KEY (run_id, idx)
 );
+
+CREATE TABLE IF NOT EXISTS timers (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    cron TEXT,
+    tz TEXT NOT NULL,
+    note TEXT NOT NULL,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS timers_due ON timers (status, due_at);
 """
 
 
 def _ts(value: datetime) -> str:
-    # Fixed-width timestamps so text order matches time order.
-    return value.isoformat(timespec="microseconds")
+    # Fixed-width UTC timestamps so text order matches time order.
+    return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def _event(row: aiosqlite.Row) -> Event:
@@ -93,22 +104,25 @@ class SqliteStorage:
 
     async def add_event(self, event: Event) -> bool:
         async with self._lock:
-            cursor = await self._db.execute(
-                "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                " ON CONFLICT (idempotency_key) DO NOTHING",
-                (
-                    event.id,
-                    event.agent_id,
-                    event.subject,
-                    event.source,
-                    event.type,
-                    json.dumps(event.payload),
-                    event.idempotency_key,
-                    event.status,
-                    _ts(event.created_at),
-                ),
-            )
-            return cursor.rowcount == 1
+            return await self._insert_event(event)
+
+    async def _insert_event(self, event: Event) -> bool:
+        cursor = await self._db.execute(
+            "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (idempotency_key) DO NOTHING",
+            (
+                event.id,
+                event.agent_id,
+                event.subject,
+                event.source,
+                event.type,
+                json.dumps(event.payload),
+                event.idempotency_key,
+                event.status,
+                _ts(event.created_at),
+            ),
+        )
+        return cursor.rowcount == 1
 
     async def get_event(self, event_id: str) -> Event | None:
         async with (
@@ -181,3 +195,59 @@ class SqliteStorage:
             Step(run_id=r["run_id"], index=r["idx"], kind=r["kind"], data=json.loads(r["data"]))
             for r in rows
         ]
+
+    async def add_timer(self, timer: Timer) -> bool:
+        async with self._lock:
+            cursor = await self._db.execute(
+                "INSERT INTO timers VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                (
+                    timer.id,
+                    timer.agent_id,
+                    _ts(timer.due_at),
+                    timer.cron,
+                    timer.tz,
+                    timer.note,
+                    timer.status,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    async def due_timers(self, now: datetime) -> list[Timer]:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM timers WHERE status = ? AND due_at <= ? ORDER BY due_at",
+                (TimerStatus.ACTIVE, _ts(now)),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return [Timer.model_validate(dict(r)) for r in rows]
+
+    async def next_due_at(self) -> datetime | None:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT MIN(due_at) FROM timers WHERE status = ?", (TimerStatus.ACTIVE,)
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+
+    async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
+        async with self._transaction():
+            async with self._db.execute(
+                "SELECT 1 FROM timers WHERE id = ? AND status = ? AND due_at = ?",
+                (timer.id, TimerStatus.ACTIVE, _ts(timer.due_at)),
+            ) as cursor:
+                if await cursor.fetchone() is None:
+                    return False
+            await self._insert_event(event)
+            if next_due_at is None:
+                await self._db.execute(
+                    "UPDATE timers SET status = ? WHERE id = ?", (TimerStatus.DONE, timer.id)
+                )
+            else:
+                await self._db.execute(
+                    "UPDATE timers SET due_at = ? WHERE id = ?", (_ts(next_due_at), timer.id)
+                )
+        return True

@@ -9,6 +9,7 @@ import uvicorn
 
 from double_agent.agent import Agent
 from double_agent.api import create_app
+from double_agent.scheduler import Scheduler
 from double_agent.sqlite_storage import SqliteStorage
 from double_agent.worker import Worker
 
@@ -35,7 +36,14 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
     storage = await SqliteStorage.open(db_path)
     workers = {a.id: Worker(a, storage) for a in agents}
     server = uvicorn.Server(uvicorn.Config(create_app(storage, workers), host=host, port=port))
+
+    def wake_worker(agent_id: str) -> None:
+        if worker := workers.get(agent_id):
+            worker.wake()
+
+    scheduler = Scheduler(storage, on_event=wake_worker)
     tasks = [asyncio.create_task(w.run_forever()) for w in workers.values()]
+    tasks.append(asyncio.create_task(scheduler.run_forever()))
     try:
         await server.serve()
     finally:

@@ -1,14 +1,11 @@
 import asyncio
 import sqlite3
-from collections.abc import AsyncIterator
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from double_agent.sqlite_storage import SqliteStorage
-from double_agent.storage import InMemoryStorage, Storage
+from double_agent.storage import Storage
 from double_agent.types import Event, EventStatus, RunStatus, Step, StepKind
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
@@ -18,16 +15,6 @@ def _event(key: str, agent_id: str = "a1", at: datetime = T0) -> Event:
     return Event(
         agent_id=agent_id, source="webhook", type="ping", idempotency_key=key, created_at=at
     )
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-async def storage(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator[Storage]:
-    if request.param == "memory":
-        yield InMemoryStorage()
-        return
-    sqlite = await SqliteStorage.open(tmp_path / "db.sqlite")
-    yield sqlite
-    await sqlite.close()
 
 
 async def test_duplicate_event_is_stored_once(storage: Storage) -> None:
