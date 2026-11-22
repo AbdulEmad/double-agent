@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,9 +19,32 @@ class Tool:
         )
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """Which agent, run and step a tool is being called from."""
+
+    agent_id: str
+    run_id: str
+    step: int
+
+
+# Set by the worker while a tool runs, for built-in tools that need to know where they are.
+current_tool_call: ContextVar[ToolCall] = ContextVar("current_tool_call")
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """A recurring wake-up defined in the agent's configuration."""
+
+    cron: str
+    tz: str = "UTC"
+    note: str = ""
+
+
 @dataclass
 class Agent:
     id: str
     model: Model
     system: str = ""
     tools: list[Tool] = field(default_factory=lambda: [])
+    schedules: list[Schedule] = field(default_factory=lambda: [])

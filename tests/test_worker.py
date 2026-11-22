@@ -147,7 +147,9 @@ async def test_failed_run_is_retried_and_worker_keeps_going() -> None:
     storage = InMemoryStorage()
     model = FlakyModel()
     await storage.add_event(_event("e1"))
-    task = asyncio.create_task(Worker(Agent(id="a1", model=model), storage).run_forever(0.01))
+    task = asyncio.create_task(
+        Worker(Agent(id="a1", model=model), storage).run_forever(min_retry=0.01)
+    )
     async with asyncio.timeout(2):
         while model.calls < 2 or await storage.unfinished_run("a1"):
             await asyncio.sleep(0.01)

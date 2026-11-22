@@ -233,6 +233,25 @@ class SqliteStorage:
             row = await cursor.fetchone()
         return datetime.fromisoformat(row[0]) if row and row[0] else None
 
+    async def list_timers(self, agent_id: str) -> list[Timer]:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM timers WHERE agent_id = ? AND status = ? ORDER BY due_at",
+                (agent_id, TimerStatus.ACTIVE),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return [Timer.model_validate(dict(r)) for r in rows]
+
+    async def cancel_timer(self, agent_id: str, timer_id: str) -> bool:
+        async with self._lock:
+            cursor = await self._db.execute(
+                "UPDATE timers SET status = ? WHERE id = ? AND agent_id = ? AND status = ?",
+                (TimerStatus.CANCELLED, timer_id, agent_id, TimerStatus.ACTIVE),
+            )
+            return cursor.rowcount == 1
+
     async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
         async with self._transaction():
             async with self._db.execute(
