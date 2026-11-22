@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import closing
@@ -116,3 +117,23 @@ async def test_sqlite_uses_wal_mode(tmp_path: Path) -> None:
     await (await SqliteStorage.open(path)).close()
     with closing(sqlite3.connect(path)) as db:
         assert db.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
+async def test_sqlite_handles_concurrent_callers(tmp_path: Path) -> None:
+    # The API and every worker share one connection, so their transactions must not interleave.
+    storage = await SqliteStorage.open(tmp_path / "db.sqlite")
+    agents = [f"a{i}" for i in range(5)]
+
+    async def one_agent(agent_id: str) -> int:
+        for n in range(10):
+            await storage.add_event(_event(f"{agent_id}-{n}", agent_id=agent_id))
+        runs = 0
+        while run := await storage.start_next_run(agent_id):
+            await storage.save_step(Step(run_id=run.id, index=0, kind=StepKind.MODEL_CALL))
+            await storage.finish_run(run.id)
+            runs += 1
+        return runs
+
+    results = await asyncio.wait_for(asyncio.gather(*(one_agent(a) for a in agents)), 10)
+    assert results == [10] * len(agents)
+    await storage.close()

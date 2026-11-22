@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from double_agent.agent import Agent, Tool
@@ -32,7 +33,7 @@ async def test_run_without_tools_finishes() -> None:
     model = FakeModel([DONE])
     await storage.add_event(_event("e1"))
 
-    assert await Worker(Agent(id="a1"), storage, model).run_pending() == 1
+    assert await Worker(Agent(id="a1", model=model), storage).run_pending() == 1
     assert await storage.unfinished_run("a1") is None
     assert len(model.requests) == 1
     assert '"type": "ping"' in model.requests[0][0].content[0]["text"]
@@ -44,7 +45,7 @@ async def test_tool_result_is_sent_back_to_model() -> None:
     model = FakeModel([_tool_use("t1", n=1), DONE])
     await storage.add_event(_event("e1"))
 
-    await Worker(Agent(id="a1", tools=[_recording_tool(calls)]), storage, model).run_pending()
+    await Worker(Agent(id="a1", model=model, tools=[_recording_tool(calls)]), storage).run_pending()
 
     assert calls == [{"n": 1}]
     result = model.requests[1][-1].content[0]
@@ -65,7 +66,7 @@ async def test_failing_and_unknown_tools_return_errors() -> None:
     model = FakeModel([_tool_use("t1"), _tool_use("t2", name="nope"), DONE])
     await storage.add_event(_event("e1"))
 
-    await Worker(Agent(id="a1", tools=[tool]), storage, model).run_pending()
+    await Worker(Agent(id="a1", model=model, tools=[tool]), storage).run_pending()
 
     errors = [model.requests[i][-1].content[0] for i in (1, 2)]
     assert [(e["content"], e["is_error"]) for e in errors] == [
@@ -95,7 +96,7 @@ async def test_interrupted_run_resumes_without_repeating_steps() -> None:
 
     calls: list[dict[str, Any]] = []
     model = FakeModel([_tool_use("t2", n=2), DONE])
-    worker = Worker(Agent(id="a1", tools=[_recording_tool(calls)]), storage, model)
+    worker = Worker(Agent(id="a1", model=model, tools=[_recording_tool(calls)]), storage)
     assert await worker.run_pending() == 1
 
     assert calls == [{"n": 2}]
@@ -126,6 +127,27 @@ async def test_event_arriving_mid_run_waits_for_next_run() -> None:
     model = FakeModel([_tool_use("t1", n=1), DONE, _tool_use("t2", n=2), DONE])
     await storage.add_event(_event("e1"))
 
-    assert await Worker(Agent(id="a1", tools=[tool]), storage, model).run_pending() == 2
+    assert await Worker(Agent(id="a1", model=model, tools=[tool]), storage).run_pending() == 2
     assert order == [1, 2]
     assert max_active == 1
+
+
+async def test_failed_run_is_retried_and_worker_keeps_going() -> None:
+    class FlakyModel:
+        calls = 0
+
+        async def complete(self, messages: Any, tools: Any) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("model unavailable")
+            return DONE
+
+    storage = InMemoryStorage()
+    model = FlakyModel()
+    await storage.add_event(_event("e1"))
+    task = asyncio.create_task(Worker(Agent(id="a1", model=model), storage).run_forever(0.01))
+    async with asyncio.timeout(2):
+        while model.calls < 2 or await storage.unfinished_run("a1"):
+            await asyncio.sleep(0.01)
+    task.cancel()
+    assert await storage.start_next_run("a1") is None

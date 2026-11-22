@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from double_agent.model import ToolSpec
+from double_agent.model import Model, ToolSpec
 
 
 @dataclass
@@ -21,4 +21,5 @@ class Tool:
 @dataclass
 class Agent:
     id: str
+    model: Model
     tools: list[Tool] = field(default_factory=lambda: [])

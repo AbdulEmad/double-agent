@@ -48,10 +48,14 @@ async def main(root: Path) -> None:
         _append(actions, str(input["n"]))
         return "ok"
 
-    agent = Agent(id="a1", tools=[Tool(name="act", description="", input_schema={}, fn=act)])
+    agent = Agent(
+        id="a1",
+        model=ScriptedModel(root / "model_calls.log"),
+        tools=[Tool(name="act", description="", input_schema={}, fn=act)],
+    )
     storage = await SqliteStorage.open(root / "db.sqlite")
     await storage.add_event(Event(agent_id="a1", source="test", type="start", idempotency_key="e1"))
-    await Worker(agent, storage, ScriptedModel(root / "model_calls.log")).run_pending()
+    await Worker(agent, storage).run_pending()
     await storage.close()
 
 

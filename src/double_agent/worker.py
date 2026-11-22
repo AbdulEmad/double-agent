@@ -1,21 +1,24 @@
 import asyncio
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from double_agent.agent import Agent
-from double_agent.model import Message, Model, ModelResponse
+from double_agent.model import Message, ModelResponse
 from double_agent.storage import Storage
 from double_agent.types import Run, Step, StepKind
+
+log = logging.getLogger(__name__)
 
 
 class Worker:
     """Runs one agent's events, one run at a time, resuming any run a crash interrupted."""
 
-    def __init__(self, agent: Agent, storage: Storage, model: Model) -> None:
+    def __init__(self, agent: Agent, storage: Storage) -> None:
         self.agent = agent
         self.storage = storage
-        self.model = model
+        self._wake = asyncio.Event()
 
     async def run_pending(self) -> int:
         """Finish any interrupted run, then run every pending event. Returns runs completed."""
@@ -28,10 +31,22 @@ class Worker:
             completed += 1
         return completed
 
+    def wake(self) -> None:
+        """Check the inbox now instead of waiting for the next poll."""
+        self._wake.set()
+
     async def run_forever(self, poll_interval: float = 1.0) -> None:
         while True:
-            await self.run_pending()
-            await asyncio.sleep(poll_interval)
+            self._wake.clear()
+            try:
+                await self.run_pending()
+            except Exception:
+                # The run stays unfinished and is retried on the next pass.
+                log.exception("Run failed for agent %s", self.agent.id)
+            try:
+                await asyncio.wait_for(self._wake.wait(), poll_interval)
+            except TimeoutError:
+                pass
 
     async def execute(self, run: Run) -> None:
         """Drive a run to completion.
@@ -68,7 +83,7 @@ class Worker:
         messages = [Message(role="user", content=[{"type": "text", "text": event_text}])]
 
         async def call_model() -> dict[str, Any]:
-            return (await self.model.complete(list(messages), specs)).model_dump()
+            return (await self.agent.model.complete(list(messages), specs)).model_dump()
 
         while True:
             response = ModelResponse.model_validate(await step(StepKind.MODEL_CALL, call_model))
