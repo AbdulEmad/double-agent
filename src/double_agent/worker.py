@@ -83,7 +83,9 @@ class Worker:
         messages = [Message(role="user", content=[{"type": "text", "text": event_text}])]
 
         async def call_model() -> dict[str, Any]:
-            return (await self.agent.model.complete(list(messages), specs)).model_dump()
+            return (
+                await self.agent.model.complete(self.agent.system, list(messages), specs)
+            ).model_dump()
 
         while True:
             response = ModelResponse.model_validate(await step(StepKind.MODEL_CALL, call_model))

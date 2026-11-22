@@ -29,7 +29,9 @@ class ScriptedModel:
     def __init__(self, log: Path) -> None:
         self.log = log
 
-    async def complete(self, messages: list[Message], tools: list[ToolSpec]) -> ModelResponse:
+    async def complete(
+        self, system: str, messages: list[Message], tools: list[ToolSpec]
+    ) -> ModelResponse:
         turn = sum(1 for m in messages if m.role == "assistant")
         _append(self.log, str(turn))
         if turn < 2:
