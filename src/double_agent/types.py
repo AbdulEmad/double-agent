@@ -48,6 +48,7 @@ class Run(BaseModel):
 class TimerStatus(StrEnum):
     ACTIVE = "active"
     DONE = "done"
+    CANCELLED = "cancelled"
 
 
 class Timer(BaseModel):

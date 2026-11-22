@@ -44,6 +44,14 @@ class Storage(Protocol):
         """Return when the earliest active timer is due, if there is one."""
         ...
 
+    async def list_timers(self, agent_id: str) -> list[Timer]:
+        """Return the agent's active timers, earliest first."""
+        ...
+
+    async def cancel_timer(self, agent_id: str, timer_id: str) -> bool:
+        """Cancel one of the agent's active timers. Returns False if there was no such timer."""
+        ...
+
     async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
         """Add a timer's event and move the timer on, in one step.
 
@@ -121,6 +129,17 @@ class InMemoryStorage:
 
     async def next_due_at(self) -> datetime | None:
         return min((t.due_at for t in self._active_timers()), default=None)
+
+    async def list_timers(self, agent_id: str) -> list[Timer]:
+        mine = [t for t in self._active_timers() if t.agent_id == agent_id]
+        return [t.model_copy() for t in sorted(mine, key=lambda t: t.due_at)]
+
+    async def cancel_timer(self, agent_id: str, timer_id: str) -> bool:
+        timer = self._timers.get(timer_id)
+        if timer is None or timer.agent_id != agent_id or timer.status != TimerStatus.ACTIVE:
+            return False
+        timer.status = TimerStatus.CANCELLED
+        return True
 
     async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
         stored = self._timers.get(timer.id)

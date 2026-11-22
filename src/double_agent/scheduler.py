@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 
+from double_agent.agent import Agent, Schedule
 from double_agent.storage import Storage
 from double_agent.types import Event, Timer
 
@@ -50,6 +52,32 @@ def timer_event(timer: Timer) -> Event:
         payload={"timer_id": timer.id, "note": timer.note, "due_at": timer.due_at.isoformat()},
         idempotency_key=f"timer:{timer.id}:{timer.due_at.isoformat()}",
     )
+
+
+def schedule_timer_id(agent_id: str, schedule: Schedule) -> str:
+    """A fixed id for a configured schedule, so restarts find the same timer."""
+    digest = hashlib.sha256(f"{schedule.cron}\n{schedule.tz}\n{schedule.note}".encode())
+    return f"schedule:{agent_id}:{digest.hexdigest()[:16]}"
+
+
+async def sync_schedules(
+    storage: Storage, agents: list[Agent], now: datetime | None = None
+) -> None:
+    """Make each agent's stored schedule timers match its configured `schedules`.
+
+    New schedules get a timer, timers for schedules no longer configured are cancelled, and
+    unchanged schedules keep their timer and next fire time. A changed schedule counts as a
+    removed one plus a new one.
+    """
+    for agent in agents:
+        wanted = {schedule_timer_id(agent.id, s): s for s in agent.schedules}
+        prefix = f"schedule:{agent.id}:"
+        for timer in await storage.list_timers(agent.id):
+            if timer.id.startswith(prefix) and timer.id not in wanted:
+                await storage.cancel_timer(agent.id, timer.id)
+        for timer_id, s in wanted.items():
+            timer = recurring(agent.id, s.cron, s.tz, s.note, now)
+            await storage.add_timer(timer.model_copy(update={"id": timer_id}))
 
 
 class Scheduler:

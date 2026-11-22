@@ -53,8 +53,8 @@ async def test_unknown_agent_and_missing_key_are_rejected(storage: SqliteStorage
 async def test_new_event_wakes_the_worker(storage: SqliteStorage) -> None:
     model = FakeModel([DONE])
     worker = Worker(Agent(id="a1", model=model), storage)
-    # A long poll interval, so only the wake-up can explain a quick run.
-    task = asyncio.create_task(worker.run_forever(poll_interval=60))
+    # Workers don't poll, so only the wake-up can explain the run.
+    task = asyncio.create_task(worker.run_forever())
     await asyncio.sleep(0.05)
     async with _client(worker) as client:
         await client.post("/events", json=WEBHOOK)

@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from double_agent.agent import Agent
+from double_agent.agent import Agent, Tool, ToolCall, current_tool_call
 from double_agent.model import Message, ModelResponse
 from double_agent.storage import Storage
 from double_agent.types import Run, Step, StepKind
@@ -13,11 +13,15 @@ log = logging.getLogger(__name__)
 
 
 class Worker:
-    """Runs one agent's events, one run at a time, resuming any run a crash interrupted."""
+    """Runs one agent's events, one run at a time, resuming any run a crash interrupted.
 
-    def __init__(self, agent: Agent, storage: Storage) -> None:
+    `builtins` are tools every agent gets on top of its own, such as the timer tools.
+    """
+
+    def __init__(self, agent: Agent, storage: Storage, builtins: list[Tool] | None = None) -> None:
         self.agent = agent
         self.storage = storage
+        self.tools = [*agent.tools, *(builtins or [])]
         self._wake = asyncio.Event()
 
     async def run_pending(self) -> int:
@@ -32,19 +36,26 @@ class Worker:
         return completed
 
     def wake(self) -> None:
-        """Check the inbox now instead of waiting for the next poll."""
+        """Check the inbox now. The API and the scheduler call this when they add an event."""
         self._wake.set()
 
-    async def run_forever(self, poll_interval: float = 1.0) -> None:
+    async def run_forever(self, min_retry: float = 1.0, max_retry: float = 300.0) -> None:
+        """Run events as they arrive. While idle, wait for a wake-up without polling.
+
+        A failed run stays unfinished and is retried after a delay that doubles from
+        `min_retry` up to `max_retry` seconds, and resets once a pass succeeds.
+        """
+        retry: float | None = None
         while True:
             self._wake.clear()
             try:
                 await self.run_pending()
+                retry = None
             except Exception:
-                # The run stays unfinished and is retried on the next pass.
-                log.exception("Run failed for agent %s", self.agent.id)
+                retry = min_retry if retry is None else min(retry * 2, max_retry)
+                log.exception("Run failed for agent %s; retrying in %ss", self.agent.id, retry)
             try:
-                await asyncio.wait_for(self._wake.wait(), poll_interval)
+                await asyncio.wait_for(self._wake.wait(), retry)
             except TimeoutError:
                 pass
 
@@ -70,8 +81,8 @@ class Worker:
             index += 1
             return data
 
-        tools = {t.name: t for t in self.agent.tools}
-        specs = [t.spec() for t in self.agent.tools]
+        tools = {t.name: t for t in self.tools}
+        specs = [t.spec() for t in self.tools]
         event_text = json.dumps(
             {
                 "source": event.source,
@@ -102,10 +113,13 @@ class Worker:
                     tool = tools.get(block["name"])
                     if tool is None:
                         return {"output": f"Unknown tool: {block['name']}", "is_error": True}
+                    token = current_tool_call.set(ToolCall(self.agent.id, run.id, index))
                     try:
                         return {"output": await tool.fn(block["input"]), "is_error": False}
                     except Exception as exc:
                         return {"output": f"{type(exc).__name__}: {exc}", "is_error": True}
+                    finally:
+                        current_tool_call.reset(token)
 
                 result = await step(StepKind.TOOL_CALL, call_tool)
                 results.append(
