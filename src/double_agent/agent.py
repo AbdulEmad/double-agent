@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from double_agent.model import Model, ToolSpec
+from double_agent.outbox import Channel
 
 
 @dataclass
@@ -48,3 +49,5 @@ class Agent:
     system: str = ""
     tools: list[Tool] = field(default_factory=lambda: [])
     schedules: list[Schedule] = field(default_factory=lambda: [])
+    # Where the agent can send messages, by name. The agent picks a name; it never sees a URL.
+    channels: dict[str, Channel] = field(default_factory=lambda: {})

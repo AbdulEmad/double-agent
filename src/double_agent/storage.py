@@ -1,7 +1,17 @@
 from datetime import datetime
 from typing import Protocol
 
-from double_agent.types import Event, EventStatus, Run, RunStatus, Step, Timer, TimerStatus
+from double_agent.types import (
+    Event,
+    EventStatus,
+    OutboxItem,
+    OutboxStatus,
+    Run,
+    RunStatus,
+    Step,
+    Timer,
+    TimerStatus,
+)
 
 
 class Storage(Protocol):
@@ -61,6 +71,26 @@ class Storage(Protocol):
         """
         ...
 
+    async def add_outbox_item(self, item: OutboxItem) -> bool:
+        """Queue a message. Returns False if an item with its id is already queued."""
+        ...
+
+    async def due_outbox_items(self, now: datetime) -> list[OutboxItem]:
+        """Return pending items whose next attempt is due at or before `now`, oldest first."""
+        ...
+
+    async def next_outbox_at(self) -> datetime | None:
+        """Return when the earliest pending item's next attempt is due, if there is one."""
+        ...
+
+    async def record_delivery(self, item_id: str) -> None:
+        """Mark an item sent."""
+        ...
+
+    async def record_failure(self, item_id: str, error: str, retry_at: datetime | None) -> None:
+        """Count a failed attempt. Retry at `retry_at`, or mark the item failed when it is None."""
+        ...
+
 
 class InMemoryStorage:
     def __init__(self) -> None:
@@ -68,6 +98,7 @@ class InMemoryStorage:
         self._runs: dict[str, Run] = {}
         self._steps: dict[str, list[Step]] = {}
         self._timers: dict[str, Timer] = {}
+        self._outbox: dict[str, OutboxItem] = {}
 
     async def add_event(self, event: Event) -> bool:
         if event.idempotency_key in self._events:
@@ -154,3 +185,32 @@ class InMemoryStorage:
 
     def _active_timers(self) -> list[Timer]:
         return [t for t in self._timers.values() if t.status == TimerStatus.ACTIVE]
+
+    async def add_outbox_item(self, item: OutboxItem) -> bool:
+        if item.id in self._outbox:
+            return False
+        self._outbox[item.id] = item.model_copy()
+        return True
+
+    async def due_outbox_items(self, now: datetime) -> list[OutboxItem]:
+        due = [i for i in self._pending_outbox() if i.next_attempt_at <= now]
+        due.sort(key=lambda i: (i.next_attempt_at, i.created_at))
+        return [i.model_copy() for i in due]
+
+    async def next_outbox_at(self) -> datetime | None:
+        return min((i.next_attempt_at for i in self._pending_outbox()), default=None)
+
+    async def record_delivery(self, item_id: str) -> None:
+        self._outbox[item_id].status = OutboxStatus.SENT
+
+    async def record_failure(self, item_id: str, error: str, retry_at: datetime | None) -> None:
+        item = self._outbox[item_id]
+        item.attempts += 1
+        item.last_error = error
+        if retry_at is None:
+            item.status = OutboxStatus.FAILED
+        else:
+            item.next_attempt_at = retry_at
+
+    def _pending_outbox(self) -> list[OutboxItem]:
+        return [i for i in self._outbox.values() if i.status == OutboxStatus.PENDING]

@@ -78,13 +78,19 @@ class Step(BaseModel):
 class OutboxStatus(StrEnum):
     PENDING = "pending"
     SENT = "sent"
+    FAILED = "failed"
 
 
 class OutboxItem(BaseModel):
+    """A message the agent decided to send, waiting for the dispatcher to deliver it."""
+
     id: str = Field(default_factory=_new_id)
     agent_id: str
     channel: str
-    target: str
     body: str
-    dedupe_key: str
+    # When the next delivery attempt is due. Starts at the requested delivery time.
+    next_attempt_at: AwareDatetime = Field(default_factory=_now)
     status: OutboxStatus = OutboxStatus.PENDING
+    attempts: int = 0
+    last_error: str | None = None
+    created_at: AwareDatetime = Field(default_factory=_now)

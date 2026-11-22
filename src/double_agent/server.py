@@ -9,6 +9,8 @@ import uvicorn
 
 from double_agent.agent import Agent
 from double_agent.api import create_app
+from double_agent.dispatcher import Dispatcher
+from double_agent.message_tool import send_message_tool
 from double_agent.scheduler import Scheduler, sync_schedules
 from double_agent.sqlite_storage import SqliteStorage
 from double_agent.timer_tools import timer_tools
@@ -42,12 +44,17 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
             worker.wake()
 
     scheduler = Scheduler(storage, on_event=wake_worker)
-    builtins = timer_tools(storage, on_change=scheduler.wake)
-    workers.update({a.id: Worker(a, storage, builtins) for a in agents})
+    dispatcher = Dispatcher(storage, {a.id: a.channels for a in agents})
+    for agent in agents:
+        builtins = timer_tools(storage, on_change=scheduler.wake)
+        if agent.channels:
+            builtins.append(send_message_tool(list(agent.channels), storage, dispatcher.wake))
+        workers[agent.id] = Worker(agent, storage, builtins)
     await sync_schedules(storage, agents)
     server = uvicorn.Server(uvicorn.Config(create_app(storage, workers), host=host, port=port))
     tasks = [asyncio.create_task(w.run_forever()) for w in workers.values()]
     tasks.append(asyncio.create_task(scheduler.run_forever()))
+    tasks.append(asyncio.create_task(dispatcher.run_forever()))
     try:
         await server.serve()
     finally:
