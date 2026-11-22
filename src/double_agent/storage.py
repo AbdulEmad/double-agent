@@ -1,6 +1,7 @@
+from datetime import datetime
 from typing import Protocol
 
-from double_agent.types import Event, EventStatus, Run, RunStatus, Step
+from double_agent.types import Event, EventStatus, Run, RunStatus, Step, Timer, TimerStatus
 
 
 class Storage(Protocol):
@@ -31,12 +32,34 @@ class Storage(Protocol):
         """Return a run's saved steps in order."""
         ...
 
+    async def add_timer(self, timer: Timer) -> bool:
+        """Store a timer. Returns False if a timer with its id already exists."""
+        ...
+
+    async def due_timers(self, now: datetime) -> list[Timer]:
+        """Return active timers due at or before `now`, earliest first."""
+        ...
+
+    async def next_due_at(self) -> datetime | None:
+        """Return when the earliest active timer is due, if there is one."""
+        ...
+
+    async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
+        """Add a timer's event and move the timer on, in one step.
+
+        The timer moves to `next_due_at`, or is marked done when that is None. Does nothing and
+        returns False if the timer has already fired for `timer.due_at`, so two schedulers can
+        never fire the same tick twice.
+        """
+        ...
+
 
 class InMemoryStorage:
     def __init__(self) -> None:
         self._events: dict[str, Event] = {}
         self._runs: dict[str, Run] = {}
         self._steps: dict[str, list[Step]] = {}
+        self._timers: dict[str, Timer] = {}
 
     async def add_event(self, event: Event) -> bool:
         if event.idempotency_key in self._events:
@@ -85,3 +108,30 @@ class InMemoryStorage:
     async def load_steps(self, run_id: str) -> list[Step]:
         steps = sorted(self._steps.get(run_id, []), key=lambda s: s.index)
         return [s.model_copy() for s in steps]
+
+    async def add_timer(self, timer: Timer) -> bool:
+        if timer.id in self._timers:
+            return False
+        self._timers[timer.id] = timer.model_copy()
+        return True
+
+    async def due_timers(self, now: datetime) -> list[Timer]:
+        due = [t for t in self._active_timers() if t.due_at <= now]
+        return [t.model_copy() for t in sorted(due, key=lambda t: t.due_at)]
+
+    async def next_due_at(self) -> datetime | None:
+        return min((t.due_at for t in self._active_timers()), default=None)
+
+    async def fire_timer(self, timer: Timer, event: Event, next_due_at: datetime | None) -> bool:
+        stored = self._timers.get(timer.id)
+        if stored is None or stored.status != TimerStatus.ACTIVE or stored.due_at != timer.due_at:
+            return False
+        await self.add_event(event)
+        if next_due_at is None:
+            stored.status = TimerStatus.DONE
+        else:
+            stored.due_at = next_due_at
+        return True
+
+    def _active_timers(self) -> list[Timer]:
+        return [t for t in self._timers.values() if t.status == TimerStatus.ACTIVE]

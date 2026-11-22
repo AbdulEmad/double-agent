@@ -3,7 +3,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 
 def _new_id() -> str:
@@ -43,6 +43,23 @@ class Run(BaseModel):
     event_id: str
     status: RunStatus = RunStatus.RUNNING
     started_at: datetime = Field(default_factory=_now)
+
+
+class TimerStatus(StrEnum):
+    ACTIVE = "active"
+    DONE = "done"
+
+
+class Timer(BaseModel):
+    """A future event for an agent: one-off, or recurring when `cron` is set."""
+
+    id: str = Field(default_factory=_new_id)
+    agent_id: str
+    due_at: AwareDatetime
+    cron: str | None = None
+    tz: str = "UTC"
+    note: str = ""
+    status: TimerStatus = TimerStatus.ACTIVE
 
 
 class StepKind(StrEnum):
