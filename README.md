@@ -22,6 +22,50 @@ double-agent builds always-on agents from five parts: an inbox, timers, memory, 
 
 Out of scope: distributed workers, multi-tenancy, a web dashboard and step-level replay.
 
+## Architecture
+
+Everything runs in one process on one machine, with all state in a single SQLite file. Events reach the inbox from webhooks, timers and approval answers. Each agent has one worker that claims the oldest event and drives the agent loop, saving every step so a crashed run can resume where it left off. Tool calls pass through the permission policy and the credential proxy, and anything the agent wants to say goes through the outbox.
+
+```mermaid
+flowchart TB
+    WH["Webhooks"] -->|POST /events| API["HTTP API<br/>FastAPI"]
+    API -->|dedupe by idempotency key| INBOX
+
+    subgraph db["SQLite, WAL mode"]
+        INBOX[("Inbox<br/>events")]
+        TIMERS[("Timers")]
+        RUNS[("Runs and<br/>transcripts")]
+        OUTBOX[("Outbox")]
+    end
+
+    SCHED["Scheduler"] -->|reads due timers| TIMERS
+    SCHED -->|enqueues timer events| INBOX
+
+    subgraph worker["Worker, one per agent"]
+        LOOP["Agent loop"]
+        POLICY["Permission policy"]
+        BUDGET["Budgets and kill switch"]
+    end
+
+    INBOX -->|claims oldest event| LOOP
+    LOOP <-->|saves each step, replays after a crash| RUNS
+    LOOP <-->|complete| MODEL["Model interface<br/>Anthropic SDK"]
+    LOOP <-->|index loaded each run| MEM[["Memory files"]]
+    LOOP -->|sets follow-ups| TIMERS
+    LOOP -->|tool calls| POLICY
+    BUDGET -.->|stops the run| LOOP
+    POLICY -->|allowed| PROXY["Credential proxy"]
+    PROXY -->|injects secrets| EXT["External APIs"]
+    POLICY -->|needs approval, pauses the run| OUTBOX
+    LOOP -->|send, stay silent or defer| OUTBOX
+    OUTBOX --> DISP["Outbox dispatcher"]
+    DISP --> CH["Delivery channels"]
+
+    CLI["CLI control plane"] -->|approval answers| INBOX
+    CLI -->|timeline: why it woke, steps, cost| RUNS
+    CLI -.->|pause, resume, kill| worker
+```
+
 ## Tech stack
 
 Python 3.12+ and asyncio, SQLite (WAL mode) via `aiosqlite`, FastAPI and `uvicorn` for incoming webhooks, `httpx` for the credential proxy, Pydantic v2, a Typer CLI, and the Anthropic SDK behind a small model interface. Tooling is `uv`, `ruff`, `pyright` and `pytest`.
