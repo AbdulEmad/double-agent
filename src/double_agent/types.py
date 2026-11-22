@@ -17,6 +17,7 @@ def _now() -> datetime:
 class EventStatus(StrEnum):
     PENDING = "pending"
     CLAIMED = "claimed"
+    DONE = "done"
 
 
 class Event(BaseModel):
@@ -29,6 +30,19 @@ class Event(BaseModel):
     idempotency_key: str
     status: EventStatus = EventStatus.PENDING
     created_at: datetime = Field(default_factory=_now)
+
+
+class RunStatus(StrEnum):
+    RUNNING = "running"
+    FINISHED = "finished"
+
+
+class Run(BaseModel):
+    id: str = Field(default_factory=_new_id)
+    agent_id: str
+    event_id: str
+    status: RunStatus = RunStatus.RUNNING
+    started_at: datetime = Field(default_factory=_now)
 
 
 class StepKind(StrEnum):

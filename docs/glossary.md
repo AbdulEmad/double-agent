@@ -5,7 +5,7 @@ These terms are used consistently in the code, docs and CLI.
 - **Agent:** a configured worker with a system prompt, tools and a budget. It lives indefinitely and acts only when woken by an event.
 - **Event:** something that happened and may need the agent's attention, such as a webhook delivery, a fired timer or an approval answer. Every event has an idempotency key, so the same delivery is stored only once.
 - **Inbox:** the queue of events waiting for one agent. Each agent has one inbox and one worker.
-- **Run:** one wake-up of an agent. A run claims pending events from the inbox, works on them and ends. Events that arrive during a run wait for the next run.
+- **Run:** one wake-up of an agent. A run claims the oldest pending event in the inbox, works on it and ends. An agent has at most one unfinished run, and events that arrive during a run wait for the next run.
 - **Step:** one unit of work inside a run, such as a model call or a tool call. Steps are saved as they happen.
 - **Transcript:** the ordered list of a run's saved steps. A run that crashes resumes from its transcript.
 - **Timer:** a scheduled future event, either one-off or recurring. When it is due, the scheduler puts an event in the agent's inbox.
