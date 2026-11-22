@@ -14,7 +14,7 @@ async def test_fake_model_returns_scripted_responses() -> None:
     fake = FakeModel([response])
     model: Model = fake
     messages = [Message(role="user", content=[{"type": "text", "text": "hello"}])]
-    assert await model.complete(messages, []) == response
+    assert await model.complete("", messages, []) == response
     assert fake.requests == [messages]
 
 

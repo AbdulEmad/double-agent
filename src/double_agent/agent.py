@@ -22,4 +22,5 @@ class Tool:
 class Agent:
     id: str
     model: Model
+    system: str = ""
     tools: list[Tool] = field(default_factory=lambda: [])

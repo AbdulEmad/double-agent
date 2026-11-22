@@ -33,8 +33,10 @@ async def test_run_without_tools_finishes() -> None:
     model = FakeModel([DONE])
     await storage.add_event(_event("e1"))
 
-    assert await Worker(Agent(id="a1", model=model), storage).run_pending() == 1
+    agent = Agent(id="a1", model=model, system="Be brief.")
+    assert await Worker(agent, storage).run_pending() == 1
     assert await storage.unfinished_run("a1") is None
+    assert model.systems == ["Be brief."]
     assert len(model.requests) == 1
     assert '"type": "ping"' in model.requests[0][0].content[0]["text"]
 
@@ -136,7 +138,7 @@ async def test_failed_run_is_retried_and_worker_keeps_going() -> None:
     class FlakyModel:
         calls = 0
 
-        async def complete(self, messages: Any, tools: Any) -> ModelResponse:
+        async def complete(self, system: str, messages: Any, tools: Any) -> ModelResponse:
             self.calls += 1
             if self.calls == 1:
                 raise ConnectionError("model unavailable")
