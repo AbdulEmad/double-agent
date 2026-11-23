@@ -5,7 +5,7 @@ from typing import Any
 
 from double_agent.agent import Tool, current_tool_call
 from double_agent.scheduler import once, recurring
-from double_agent.storage import Storage
+from double_agent.storage import Storage, task_subject
 
 _SET_TIMER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -31,6 +31,11 @@ _SET_TIMER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "What to do when the timer fires. The run it starts sees only this "
             "note, not this conversation, so include everything it will need.",
+        },
+        "task_id": {
+            "type": "string",
+            "description": "Attach the timer to this task, so the run it starts loads the task. "
+            "Defaults to the task this run is about, if any.",
         },
     },
     "required": ["note"],
@@ -60,8 +65,11 @@ def timer_tools(
         else:
             due = clock() + timedelta(minutes=float(input["delay_minutes"]))
             timer = once(call.agent_id, due, note)
+        subject = task_subject(input["task_id"]) if input.get("task_id") else call.subject
+        if subject is not None and not subject.startswith("task:"):
+            subject = None
         # Named after the run and step, so a resumed run can't create the same timer twice.
-        timer = timer.model_copy(update={"id": f"{call.run_id}:{call.step}"})
+        timer = timer.model_copy(update={"id": f"{call.run_id}:{call.step}", "subject": subject})
         await storage.add_timer(timer)
         on_change()
         repeat = f", then repeating on '{timer.cron}' ({timer.tz})" if timer.cron else ""

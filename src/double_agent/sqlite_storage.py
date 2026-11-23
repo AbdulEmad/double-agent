@@ -8,6 +8,7 @@ from typing import Any
 
 import aiosqlite
 
+from double_agent.storage import apply_task_update, task_subject
 from double_agent.types import (
     Approval,
     ApprovalStatus,
@@ -18,6 +19,12 @@ from double_agent.types import (
     Run,
     RunStatus,
     Step,
+    Task,
+    TaskItem,
+    TaskLogEntry,
+    TaskStatus,
+    TaskUpdate,
+    TaskView,
     Timer,
     TimerStatus,
 )
@@ -62,7 +69,8 @@ CREATE TABLE IF NOT EXISTS timers (
     cron TEXT,
     tz TEXT NOT NULL,
     note TEXT NOT NULL,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    subject TEXT
 );
 CREATE INDEX IF NOT EXISTS timers_due ON timers (status, due_at);
 
@@ -90,7 +98,50 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS approvals_status ON approvals (status, created_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    agent_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    notes TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS task_items (
+    agent_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    key TEXT NOT NULL,
+    description TEXT NOT NULL,
+    party TEXT,
+    status TEXT NOT NULL,
+    note TEXT,
+    PRIMARY KEY (agent_id, task_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS task_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_log_task ON task_log (agent_id, task_id, seq);
+
+-- Tool calls that created or updated a task, so a resumed run doesn't apply one twice.
+CREATE TABLE IF NOT EXISTS task_ops (
+    op_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    task_id TEXT NOT NULL
+);
 """
+
+# Columns added after a table was first released, as (table, column, definition).
+_ADDED_COLUMNS = [("timers", "subject", "TEXT")]
 
 
 def _ts(value: datetime) -> str:
@@ -129,6 +180,10 @@ class SqliteStorage:
         await db.execute("PRAGMA journal_mode = WAL")
         await db.execute("PRAGMA foreign_keys = ON")
         await db.executescript(_SCHEMA)
+        for table, column, definition in _ADDED_COLUMNS:
+            existing = {row[1] for row in await db.execute_fetchall(f"PRAGMA table_info({table})")}
+            if column not in existing:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         return cls(db)
 
     async def close(self) -> None:
@@ -265,7 +320,8 @@ class SqliteStorage:
     async def add_timer(self, timer: Timer) -> bool:
         async with self._lock:
             cursor = await self._db.execute(
-                "INSERT INTO timers VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+                "INSERT INTO timers (id, agent_id, due_at, cron, tz, note, status, subject)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
                 (
                     timer.id,
                     timer.agent_id,
@@ -274,6 +330,7 @@ class SqliteStorage:
                     timer.tz,
                     timer.note,
                     timer.status,
+                    timer.subject,
                 ),
             )
             return cursor.rowcount == 1
@@ -447,3 +504,113 @@ class SqliteStorage:
             row = await cursor.fetchone()
             await cursor.close()
         return _approval(row) if row else None
+
+    async def create_task(self, task: Task, items: list[TaskItem], op_id: str) -> TaskView:
+        async with self._transaction():
+            if existing := await self._task_for_op(op_id):
+                return existing
+            if await self._load_task(task.agent_id, task.id):
+                raise ValueError(f"Task id {task.id!r} is already used")
+            view = TaskView(task=task, items=items, log=[])
+            await self._db.execute(
+                "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task.agent_id,
+                    task.id,
+                    task.title,
+                    task.goal,
+                    task.status,
+                    task.notes,
+                    _ts(task.created_at),
+                    _ts(task.updated_at),
+                ),
+            )
+            await self._write_items(view)
+            await self._record_task_op(op_id, task.agent_id, task.id)
+        return view
+
+    async def get_task(self, agent_id: str, task_id: str) -> TaskView | None:
+        async with self._lock:
+            return await self._load_task(agent_id, task_id)
+
+    async def list_tasks(self, agent_id: str | None, status: TaskStatus | None) -> list[Task]:
+        query, args = "SELECT * FROM tasks WHERE 1 = 1", list[str]()
+        if agent_id is not None:
+            query, args = query + " AND agent_id = ?", [*args, agent_id]
+        if status is not None:
+            query, args = query + " AND status = ?", [*args, status]
+        async with self._lock, self._db.execute(query + " ORDER BY created_at DESC", args) as cur:
+            rows = await cur.fetchall()
+        return [Task.model_validate(dict(r)) for r in rows]
+
+    async def update_task(
+        self, agent_id: str, task_id: str, update: TaskUpdate, op_id: str
+    ) -> TaskView:
+        async with self._transaction():
+            view = await self._load_task(agent_id, task_id)
+            if view is None:
+                raise ValueError(f"No task {task_id!r}")
+            if await self._task_for_op(op_id):
+                return view
+            apply_task_update(view, update)
+            await self._db.execute(
+                "UPDATE tasks SET status = ?, notes = ?, updated_at = ?"
+                " WHERE agent_id = ? AND id = ?",
+                (view.task.status, view.task.notes, _ts(view.task.updated_at), agent_id, task_id),
+            )
+            await self._write_items(view)
+            if update.log:
+                entry = view.log[-1]
+                await self._db.execute(
+                    "INSERT INTO task_log (agent_id, task_id, at, text) VALUES (?, ?, ?, ?)",
+                    (agent_id, task_id, _ts(entry.at), entry.text),
+                )
+            if view.task.status != TaskStatus.OPEN:
+                await self._db.execute(
+                    "UPDATE timers SET status = ?"
+                    " WHERE agent_id = ? AND subject = ? AND status = ?",
+                    (TimerStatus.CANCELLED, agent_id, task_subject(task_id), TimerStatus.ACTIVE),
+                )
+            await self._record_task_op(op_id, agent_id, task_id)
+        return view
+
+    async def _load_task(self, agent_id: str, task_id: str) -> TaskView | None:
+        key = (agent_id, task_id)
+        async with self._db.execute(
+            "SELECT * FROM tasks WHERE agent_id = ? AND id = ?", key
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        async with self._db.execute(
+            "SELECT key, description, party, status, note FROM task_items"
+            " WHERE agent_id = ? AND task_id = ? ORDER BY position",
+            key,
+        ) as cursor:
+            items = [TaskItem.model_validate(dict(r)) for r in await cursor.fetchall()]
+        async with self._db.execute(
+            "SELECT at, text FROM task_log WHERE agent_id = ? AND task_id = ? ORDER BY seq", key
+        ) as cursor:
+            log = [TaskLogEntry.model_validate(dict(r)) for r in await cursor.fetchall()]
+        return TaskView(task=Task.model_validate(dict(row)), items=items, log=log)
+
+    async def _write_items(self, view: TaskView) -> None:
+        key = (view.task.agent_id, view.task.id)
+        await self._db.execute("DELETE FROM task_items WHERE agent_id = ? AND task_id = ?", key)
+        await self._db.executemany(
+            "INSERT INTO task_items VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (*key, position, i.key, i.description, i.party, i.status, i.note)
+                for position, i in enumerate(view.items)
+            ],
+        )
+
+    async def _task_for_op(self, op_id: str) -> TaskView | None:
+        async with self._db.execute(
+            "SELECT agent_id, task_id FROM task_ops WHERE op_id = ?", (op_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return await self._load_task(row["agent_id"], row["task_id"]) if row else None
+
+    async def _record_task_op(self, op_id: str, agent_id: str, task_id: str) -> None:
+        await self._db.execute("INSERT INTO task_ops VALUES (?, ?, ?)", (op_id, agent_id, task_id))

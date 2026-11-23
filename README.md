@@ -72,7 +72,7 @@ Python 3.12+ and asyncio, SQLite (WAL mode) via `aiosqlite`, FastAPI and `uvicor
 
 ## Roadmap
 
-Each phase ends with a check that shows it works.
+Each phase ends with a check that shows it works. Memory (phase 5) is being built before safety and budgets (phase 4).
 
 - [x] **0. Spec and skeleton:** glossary; interfaces for storage, model calls and the outbox; a decision on events that arrive mid-run; repo skeleton and CI.
   - *Done when:* CI runs ruff, pyright and pytest and passes; each interface has an in-memory fake that a test exercises; the glossary and the mid-run decision are written down.

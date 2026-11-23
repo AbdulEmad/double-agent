@@ -49,6 +49,7 @@ def timer_event(timer: Timer) -> Event:
         agent_id=timer.agent_id,
         source="timer",
         type="timer",
+        subject=timer.subject,
         payload={"timer_id": timer.id, "note": timer.note, "due_at": timer.due_at.isoformat()},
         idempotency_key=f"timer:{timer.id}:{timer.due_at.isoformat()}",
     )

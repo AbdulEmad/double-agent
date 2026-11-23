@@ -13,6 +13,7 @@ from double_agent.dispatcher import Dispatcher
 from double_agent.message_tool import send_message_tool
 from double_agent.scheduler import Scheduler, sync_schedules
 from double_agent.sqlite_storage import SqliteStorage
+from double_agent.tasks import task_tools
 from double_agent.timer_tools import timer_tools
 from double_agent.worker import Worker
 
@@ -52,7 +53,7 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
     scheduler = Scheduler(storage, on_event=wake_worker)
     dispatcher = Dispatcher(storage, {a.id: a.channels for a in agents})
     for agent in agents:
-        builtins = timer_tools(storage, on_change=scheduler.wake)
+        builtins = [*timer_tools(storage, on_change=scheduler.wake), *task_tools(storage)]
         if agent.channels:
             builtins.append(send_message_tool(list(agent.channels), storage, dispatcher.wake))
         workers[agent.id] = Worker(agent, storage, builtins, on_queue=dispatcher.wake)
