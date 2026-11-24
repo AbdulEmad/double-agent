@@ -14,6 +14,8 @@ from double_agent.types import (
     ApprovalStatus,
     Event,
     EventStatus,
+    MemoryFile,
+    MemoryVersion,
     OutboxItem,
     OutboxStatus,
     Run,
@@ -138,6 +140,25 @@ CREATE TABLE IF NOT EXISTS task_ops (
     agent_id TEXT NOT NULL,
     task_id TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_versions (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content TEXT,
+    op_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    run_id TEXT,
+    at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_versions_path ON memory_versions (agent_id, path, seq);
+
+-- Memory writes already applied, with the result the tool returned, so a resumed run gets the
+-- same answer without applying the write twice.
+CREATE TABLE IF NOT EXISTS memory_ops (
+    op_id TEXT PRIMARY KEY,
+    result TEXT NOT NULL
+);
 """
 
 # Columns added after a table was first released, as (table, column, definition).
@@ -153,6 +174,16 @@ def _event(row: aiosqlite.Row) -> Event:
     fields: dict[str, Any] = dict(row)
     fields["payload"] = json.loads(fields["payload"])
     return Event.model_validate(fields)
+
+
+# The latest version of each path, leaving out deleted files.
+_CURRENT_MEMORY = """
+SELECT path, content, at FROM memory_versions AS v
+WHERE agent_id = ? AND content IS NOT NULL AND seq = (
+    SELECT MAX(seq) FROM memory_versions WHERE agent_id = v.agent_id AND path = v.path
+)
+ORDER BY path
+"""
 
 
 def _approval(row: aiosqlite.Row) -> Approval:
@@ -614,3 +645,66 @@ class SqliteStorage:
 
     async def _record_task_op(self, op_id: str, agent_id: str, task_id: str) -> None:
         await self._db.execute("INSERT INTO task_ops VALUES (?, ?, ?)", (op_id, agent_id, task_id))
+
+    async def list_memory(self, agent_id: str) -> list[MemoryFile]:
+        async with self._lock, self._db.execute(_CURRENT_MEMORY, (agent_id,)) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            MemoryFile(path=r["path"], size=len(r["content"]), updated_at=r["at"]) for r in rows
+        ]
+
+    async def read_memory(self, agent_id: str, path: str) -> str | None:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT content FROM memory_versions WHERE agent_id = ? AND path = ?"
+                " ORDER BY seq DESC LIMIT 1",
+                (agent_id, path),
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return row["content"] if row else None
+
+    async def memory_op_result(self, op_id: str) -> str | None:
+        async with (
+            self._lock,
+            self._db.execute("SELECT result FROM memory_ops WHERE op_id = ?", (op_id,)) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return row["result"] if row else None
+
+    async def write_memory(
+        self,
+        agent_id: str,
+        changes: dict[str, str | None],
+        op_id: str,
+        result: str,
+        source: str,
+        run_id: str | None,
+    ) -> None:
+        async with self._transaction():
+            cursor = await self._db.execute(
+                "INSERT INTO memory_ops VALUES (?, ?) ON CONFLICT (op_id) DO NOTHING",
+                (op_id, result),
+            )
+            if cursor.rowcount == 0:
+                return
+            at = _ts(datetime.now(UTC))
+            await self._db.executemany(
+                "INSERT INTO memory_versions (agent_id, path, content, op_id, source, run_id, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(agent_id, p, c, op_id, source, run_id, at) for p, c in changes.items()],
+            )
+
+    async def memory_history(self, agent_id: str, path: str) -> list[MemoryVersion]:
+        async with (
+            self._lock,
+            self._db.execute(
+                "SELECT * FROM memory_versions WHERE agent_id = ? AND path = ? ORDER BY seq",
+                (agent_id, path),
+            ) as cursor,
+        ):
+            rows = await cursor.fetchall()
+        return [
+            MemoryVersion.model_validate({k: r[k] for k in r.keys() if k != "seq"}) for r in rows
+        ]

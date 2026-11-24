@@ -14,4 +14,7 @@ These terms are used consistently in the code, docs and CLI.
 - **Channel:** a named place an agent can send messages, such as a webhook or a file. Channels are set in the agent's configuration; the agent picks one by name and never chooses the destination itself.
 - **Approval:** a human decision on a tool call marked as needing approval. The run pauses until someone approves or denies the call through the API or the CLI, then resumes. While it waits, the agent keeps handling its other events.
 - **Task:** a goal that takes several runs, broken into items, with free-form notes and a log of what was done. An event whose subject is `task:<id>` loads the task into its run, and timers set during that run are attached to the task.
+- **Memory:** notes an agent keeps across all its runs, as markdown files under `/memories`: preferences, facts about people and systems, lessons, and pointers to where things live. Every run is shown `/memories/INDEX.md` and a list of the other files.
+- **Standing instructions:** `/instructions.md`, written only by the agent's operator through the API or CLI and shown at the top of every run. Unlike memory, the agent can't change it.
+- **Trusted source:** an event source, such as `user`, whose runs may write memory freely. Memory writes during runs from any other source wait for approval.
 - **Budget:** the per-agent caps on tokens, cost and action rate. Crossing a cap stops the run.

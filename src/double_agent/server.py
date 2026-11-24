@@ -10,6 +10,7 @@ import uvicorn
 from double_agent.agent import Agent
 from double_agent.api import create_app
 from double_agent.dispatcher import Dispatcher
+from double_agent.memory import memory_tool
 from double_agent.message_tool import send_message_tool
 from double_agent.scheduler import Scheduler, sync_schedules
 from double_agent.sqlite_storage import SqliteStorage
@@ -53,7 +54,11 @@ async def serve(agents: list[Agent], db_path: Path, host: str, port: int) -> Non
     scheduler = Scheduler(storage, on_event=wake_worker)
     dispatcher = Dispatcher(storage, {a.id: a.channels for a in agents})
     for agent in agents:
-        builtins = [*timer_tools(storage, on_change=scheduler.wake), *task_tools(storage)]
+        builtins = [
+            *timer_tools(storage, on_change=scheduler.wake),
+            *task_tools(storage),
+            memory_tool(storage, agent.trusted_sources),
+        ]
         if agent.channels:
             builtins.append(send_message_tool(list(agent.channels), storage, dispatcher.wake))
         workers[agent.id] = Worker(agent, storage, builtins, on_queue=dispatcher.wake)

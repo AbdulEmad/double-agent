@@ -184,3 +184,21 @@ class TaskUpdate(BaseModel):
     notes: str | None = None
     log: str | None = None
     status: TaskStatus | None = None
+
+
+class MemoryFile(BaseModel):
+    path: str
+    size: int
+    updated_at: AwareDatetime
+
+
+class MemoryVersion(BaseModel):
+    """One write to a memory file, with where it came from. `content` is None for a delete."""
+
+    agent_id: str
+    path: str
+    content: str | None
+    op_id: str
+    source: str
+    run_id: str | None = None
+    at: AwareDatetime = Field(default_factory=_now)
