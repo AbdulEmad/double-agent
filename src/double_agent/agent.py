@@ -29,6 +29,8 @@ class ToolCall:
     agent_id: str
     run_id: str
     step: int
+    # The subject of the event the run is handling, such as "task:<id>".
+    subject: str | None = None
 
 
 # Set by the worker while a tool runs, for built-in tools that need to know where they are.

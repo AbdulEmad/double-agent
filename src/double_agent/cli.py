@@ -91,5 +91,30 @@ def deny(
     typer.echo(f"Denied {approval_id}.")
 
 
+tasks = typer.Typer(no_args_is_help=True, help="See the tasks agents are tracking.")
+app.add_typer(tasks, name="tasks")
+
+
+@tasks.command("list")
+def list_tasks(
+    agent: Annotated[str | None, typer.Option(help="Only this agent's tasks.")] = None,
+    status: Annotated[str, typer.Option(help="open, done or cancelled.")] = "open",
+    url: Url = DEFAULT_URL,
+) -> None:
+    """List tasks."""
+    query = f"/tasks?status={status}" + (f"&agent_id={agent}" if agent else "")
+    found = _request("GET", url, query)
+    if not found:
+        typer.echo(f"No {status} tasks.")
+    for t in found:
+        typer.echo(f"{t['agent_id']}  {t['id']}  {t['title']}  ({t['status']})")
+
+
+@tasks.command()
+def show(agent_id: str, task_id: str, url: Url = DEFAULT_URL) -> None:
+    """Show a task the way the agent sees it."""
+    typer.echo(_request("GET", url, f"/tasks/{agent_id}/{task_id}")["markdown"])
+
+
 if __name__ == "__main__":
     app()

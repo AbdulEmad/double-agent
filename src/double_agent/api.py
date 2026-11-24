@@ -4,7 +4,8 @@ from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel, Field
 
 from double_agent.storage import Storage
-from double_agent.types import Approval, Event
+from double_agent.tasks import render_task
+from double_agent.types import Approval, Event, Task, TaskStatus
 from double_agent.worker import Worker
 
 
@@ -57,5 +58,20 @@ def create_app(storage: Storage, workers: dict[str, Worker]) -> FastAPI:
         if worker := workers.get(answered.agent_id):
             worker.wake()
         return answered
+
+    @app.get("/tasks")
+    async def list_tasks(
+        agent_id: str | None = None, status: TaskStatus | None = TaskStatus.OPEN
+    ) -> list[Task]:
+        """Tasks, newest first. Open tasks unless another status is asked for."""
+        return await storage.list_tasks(agent_id, status)
+
+    @app.get("/tasks/{agent_id}/{task_id}")
+    async def get_task(agent_id: str, task_id: str) -> dict[str, str]:
+        """One task, as the markdown the agent sees."""
+        view = await storage.get_task(agent_id, task_id)
+        if view is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No task {task_id} for {agent_id}")
+        return {"markdown": render_task(view)}
 
     return app

@@ -7,6 +7,7 @@ from typing import Any
 from double_agent.agent import Agent, Tool, ToolCall, current_tool_call
 from double_agent.model import Message, ModelResponse
 from double_agent.storage import Storage
+from double_agent.tasks import render_task
 from double_agent.types import Approval, ApprovalStatus, OutboxItem, Run, Step, StepKind
 
 log = logging.getLogger(__name__)
@@ -142,7 +143,22 @@ class Worker:
                 "payload": event.payload,
             }
         )
-        messages = [Message(role="user", content=[{"type": "text", "text": event_text}])]
+        first: list[dict[str, Any]] = [{"type": "text", "text": event_text}]
+
+        async def load_task() -> dict[str, Any]:
+            assert event.subject is not None
+            task_id = event.subject.removeprefix("task:")
+            view = await self.storage.get_task(self.agent.id, task_id)
+            text = render_task(view) if view else f"Task {task_id} was not found."
+            return {"text": f"This event is about the task below.\n\n{text}"}
+
+        if event.subject and event.subject.startswith("task:"):
+            # Saved as a step so a resumed run sends the same first message, even if the task
+            # has changed since: the model must see an unchanged conversation history.
+            first.append(
+                {"type": "text", "text": (await step(StepKind.CONTEXT, load_task))["text"]}
+            )
+        messages = [Message(role="user", content=first)]
 
         async def call_model() -> dict[str, Any]:
             return (
@@ -171,7 +187,9 @@ class Worker:
                         if approval.status == ApprovalStatus.DENIED:
                             reason = f": {approval.reason}" if approval.reason else "."
                             return {"output": f"Denied by the user{reason}", "is_error": True}
-                    token = current_tool_call.set(ToolCall(self.agent.id, run.id, index))
+                    token = current_tool_call.set(
+                        ToolCall(self.agent.id, run.id, index, event.subject)
+                    )
                     try:
                         return {"output": await tool.fn(block["input"]), "is_error": False}
                     except Exception as exc:

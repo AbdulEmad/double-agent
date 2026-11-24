@@ -39,3 +39,11 @@ A run waiting for an approval is set aside rather than left running, so the agen
 ## The CLI talks to the running server
 
 `double-agent approvals` commands call the server's HTTP API rather than writing to the database. Workers only wake when signalled, so a direct database write would not resume a paused run. Set `DOUBLE_AGENT_URL` or `--url` when the server is not on `http://127.0.0.1:8000`.
+
+## Task memory is structured, shown as markdown
+
+A task's items, statuses, notes and log are stored as rows in SQLite and shown to the agent as a markdown file. Markdown is what the model reads and writes best; the structure lets the runtime enforce rules a note can't, such as cancelling a task's follow-up timers when it closes. Each create or update is named after its run and step, so a resumed run never applies one twice.
+
+## A run's task context is saved with the run
+
+When a run starts on a task, the task as it looked at that moment is saved as the run's first step. A resumed run replays that snapshot, so the model sees an unchanged conversation even if the task was updated in between.

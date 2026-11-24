@@ -62,10 +62,15 @@ class Timer(BaseModel):
     cron: str | None = None
     tz: str = "UTC"
     note: str = ""
+    # Copied onto each event the timer fires, for example "task:<id>" to load that task.
+    subject: str | None = None
     status: TimerStatus = TimerStatus.ACTIVE
 
 
 class StepKind(StrEnum):
+    # Context loaded at the start of a run, such as the task it is about. Saved so a resumed run
+    # sends the model exactly the same first message.
+    CONTEXT = "context"
     MODEL_CALL = "model_call"
     TOOL_CALL = "tool_call"
 
@@ -115,3 +120,67 @@ class Approval(BaseModel):
     status: ApprovalStatus = ApprovalStatus.PENDING
     reason: str | None = None
     created_at: AwareDatetime = Field(default_factory=_now)
+
+
+class TaskStatus(StrEnum):
+    OPEN = "open"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+class ItemStatus(StrEnum):
+    TODO = "todo"
+    WAITING = "waiting"
+    DONE = "done"
+
+
+class Task(BaseModel):
+    """A goal that takes several runs, such as collecting things from several people."""
+
+    id: str
+    agent_id: str
+    title: str
+    goal: str = ""
+    status: TaskStatus = TaskStatus.OPEN
+    notes: str = ""
+    created_at: AwareDatetime = Field(default_factory=_now)
+    updated_at: AwareDatetime = Field(default_factory=_now)
+
+
+class TaskItem(BaseModel):
+    """One part of a task, such as one document from one person."""
+
+    key: str
+    description: str
+    party: str | None = None
+    status: ItemStatus = ItemStatus.TODO
+    note: str | None = None
+
+
+class TaskLogEntry(BaseModel):
+    at: AwareDatetime = Field(default_factory=_now)
+    text: str
+
+
+class TaskView(BaseModel):
+    """A task with its items and log, as the agent and the CLI see it."""
+
+    task: Task
+    items: list[TaskItem]
+    log: list[TaskLogEntry]
+
+
+class ItemUpdate(BaseModel):
+    key: str
+    status: ItemStatus | None = None
+    note: str | None = None
+
+
+class TaskUpdate(BaseModel):
+    """Changes to a task, applied together."""
+
+    items: list[ItemUpdate] = Field(default_factory=lambda: list[ItemUpdate]())
+    new_items: list[TaskItem] = Field(default_factory=lambda: list[TaskItem]())
+    notes: str | None = None
+    log: str | None = None
+    status: TaskStatus | None = None

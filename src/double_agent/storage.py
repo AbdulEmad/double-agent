@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
 from double_agent.types import (
@@ -11,9 +11,44 @@ from double_agent.types import (
     Run,
     RunStatus,
     Step,
+    Task,
+    TaskItem,
+    TaskLogEntry,
+    TaskStatus,
+    TaskUpdate,
+    TaskView,
     Timer,
     TimerStatus,
 )
+
+
+def task_subject(task_id: str) -> str:
+    """The event subject that loads a task into a run."""
+    return f"task:{task_id}"
+
+
+def apply_task_update(view: TaskView, update: TaskUpdate) -> None:
+    """Apply an update to a task in place, after checking all of it is valid."""
+    items = {i.key: i for i in view.items}
+    for change in update.items:
+        if change.key not in items:
+            raise ValueError(f"Task {view.task.id} has no item {change.key!r}")
+    for new in update.new_items:
+        if new.key in items:
+            raise ValueError(f"Task {view.task.id} already has an item {new.key!r}")
+    for change in update.items:
+        if change.status is not None:
+            items[change.key].status = change.status
+        if change.note is not None:
+            items[change.key].note = change.note
+    view.items.extend(i.model_copy() for i in update.new_items)
+    if update.notes is not None:
+        view.task.notes = update.notes
+    if update.status is not None:
+        view.task.status = update.status
+    if update.log:
+        view.log.append(TaskLogEntry(text=update.log))
+    view.task.updated_at = datetime.now(UTC)
 
 
 class Storage(Protocol):
@@ -100,6 +135,31 @@ class Storage(Protocol):
         """Record a decision on a pending request. Returns None if it is unknown or answered."""
         ...
 
+    async def create_task(self, task: Task, items: list[TaskItem], op_id: str) -> TaskView:
+        """Store a new task with its items.
+
+        `op_id` names the tool call creating it: repeating the same `op_id`, as a resumed run
+        does, returns the task it created instead of making another. Raises ValueError if the
+        agent already has a task with this id.
+        """
+        ...
+
+    async def get_task(self, agent_id: str, task_id: str) -> TaskView | None: ...
+
+    async def list_tasks(self, agent_id: str | None, status: TaskStatus | None) -> list[Task]:
+        """Return tasks, newest first, optionally only one agent's or only one status."""
+        ...
+
+    async def update_task(
+        self, agent_id: str, task_id: str, update: TaskUpdate, op_id: str
+    ) -> TaskView:
+        """Apply an update, once per `op_id`. Closing a task cancels its timers.
+
+        Raises ValueError for an unknown task, an unknown item key, or a new item whose key is
+        already used.
+        """
+        ...
+
     async def add_outbox_item(self, item: OutboxItem) -> bool:
         """Queue a message. Returns False if an item with its id is already queued."""
         ...
@@ -129,6 +189,8 @@ class InMemoryStorage:
         self._timers: dict[str, Timer] = {}
         self._outbox: dict[str, OutboxItem] = {}
         self._approvals: dict[str, Approval] = {}
+        self._tasks: dict[tuple[str, str], TaskView] = {}
+        self._task_ops: dict[str, tuple[str, str]] = {}
 
     async def add_event(self, event: Event) -> bool:
         if event.idempotency_key in self._events:
@@ -287,3 +349,42 @@ class InMemoryStorage:
         approval.status = ApprovalStatus.APPROVED if approved else ApprovalStatus.DENIED
         approval.reason = reason
         return approval.model_copy()
+
+    async def create_task(self, task: Task, items: list[TaskItem], op_id: str) -> TaskView:
+        if op_id in self._task_ops:
+            return self._tasks[self._task_ops[op_id]].model_copy(deep=True)
+        key = (task.agent_id, task.id)
+        if key in self._tasks:
+            raise ValueError(f"Task id {task.id!r} is already used")
+        self._tasks[key] = TaskView(task=task, items=list(items), log=[]).model_copy(deep=True)
+        self._task_ops[op_id] = key
+        return self._tasks[key].model_copy(deep=True)
+
+    async def get_task(self, agent_id: str, task_id: str) -> TaskView | None:
+        view = self._tasks.get((agent_id, task_id))
+        return view.model_copy(deep=True) if view else None
+
+    async def list_tasks(self, agent_id: str | None, status: TaskStatus | None) -> list[Task]:
+        tasks = [
+            v.task
+            for v in self._tasks.values()
+            if (agent_id is None or v.task.agent_id == agent_id)
+            and (status is None or v.task.status == status)
+        ]
+        return [t.model_copy() for t in sorted(tasks, key=lambda t: t.created_at, reverse=True)]
+
+    async def update_task(
+        self, agent_id: str, task_id: str, update: TaskUpdate, op_id: str
+    ) -> TaskView:
+        view = self._tasks.get((agent_id, task_id))
+        if view is None:
+            raise ValueError(f"No task {task_id!r}")
+        if op_id in self._task_ops:
+            return view.model_copy(deep=True)
+        apply_task_update(view, update)
+        self._task_ops[op_id] = (agent_id, task_id)
+        if view.task.status != TaskStatus.OPEN:
+            for timer in self._active_timers():
+                if timer.agent_id == agent_id and timer.subject == task_subject(task_id):
+                    timer.status = TimerStatus.CANCELLED
+        return view.model_copy(deep=True)

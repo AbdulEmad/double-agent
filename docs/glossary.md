@@ -13,4 +13,5 @@ These terms are used consistently in the code, docs and CLI.
 - **Outbox item:** a message the agent has decided to send. Items are delivered by the dispatcher, never directly by the agent.
 - **Channel:** a named place an agent can send messages, such as a webhook or a file. Channels are set in the agent's configuration; the agent picks one by name and never chooses the destination itself.
 - **Approval:** a human decision on a tool call marked as needing approval. The run pauses until someone approves or denies the call through the API or the CLI, then resumes. While it waits, the agent keeps handling its other events.
+- **Task:** a goal that takes several runs, broken into items, with free-form notes and a log of what was done. An event whose subject is `task:<id>` loads the task into its run, and timers set during that run are attached to the task.
 - **Budget:** the per-agent caps on tokens, cost and action rate. Crossing a cap stops the run.

@@ -77,6 +77,7 @@ def test_approval_through_the_cli_resumes_the_run(tmp_path: Path) -> None:
         assert cli("approvals", "approve", approval_id).strip() == f"Approved {approval_id}."
         _wait_for(lambda: log.exists() and log.read_text() == "prod\n")
         assert cli("approvals", "list").strip() == "No approvals waiting."
+        assert cli("tasks", "list").strip() == "No open tasks."
     finally:
         proc.terminate()
         proc.wait(timeout=10)
