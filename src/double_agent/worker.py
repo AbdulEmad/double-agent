@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from double_agent.agent import Agent, Tool, ToolCall, current_tool_call
+from double_agent.memory import run_context
 from double_agent.model import Message, ModelResponse
 from double_agent.storage import Storage
 from double_agent.tasks import render_task
@@ -117,6 +118,15 @@ class Worker:
             self.on_queue()
         return approval
 
+    async def _load_context(self, subject: str | None) -> dict[str, str | None]:
+        task = None
+        if subject and subject.startswith("task:"):
+            task_id = subject.removeprefix("task:")
+            view = await self.storage.get_task(self.agent.id, task_id)
+            text = render_task(view) if view else f"Task {task_id} was not found."
+            task = f"This event is about the task below.\n\n{text}"
+        return {"memory": await run_context(self.storage, self.agent.id), "task": task}
+
     async def _execute(self, run: Run) -> None:
         event = await self.storage.get_event(run.event_id)
         assert event is not None
@@ -143,21 +153,25 @@ class Worker:
                 "payload": event.payload,
             }
         )
-        first: list[dict[str, Any]] = [{"type": "text", "text": event_text}]
-
-        async def load_task() -> dict[str, Any]:
-            assert event.subject is not None
-            task_id = event.subject.removeprefix("task:")
-            view = await self.storage.get_task(self.agent.id, task_id)
-            text = render_task(view) if view else f"Task {task_id} was not found."
-            return {"text": f"This event is about the task below.\n\n{text}"}
-
-        if event.subject and event.subject.startswith("task:"):
-            # Saved as a step so a resumed run sends the same first message, even if the task
-            # has changed since: the model must see an unchanged conversation history.
-            first.append(
-                {"type": "text", "text": (await step(StepKind.CONTEXT, load_task))["text"]}
-            )
+        # Instructions, memory and open tasks go before the event, so the part that changes
+        # least comes first and can be cached; the task the event is about goes after it.
+        # The context is saved as step 0, so a resumed run sends the same first message even if
+        # memory or the task changed since: the model must see an unchanged history.
+        if 0 in saved:
+            context = saved[0].data if saved[0].kind == StepKind.CONTEXT else {}
+        else:
+            context = await self._load_context(event.subject)
+            if any(context.values()):
+                await self.storage.save_step(
+                    Step(run_id=run.id, index=0, kind=StepKind.CONTEXT, data=context)
+                )
+        if any(context.values()):
+            index = 1
+        first: list[dict[str, Any]] = [
+            {"type": "text", "text": text}
+            for text in (context.get("memory"), event_text, context.get("task"))
+            if text
+        ]
         messages = [Message(role="user", content=first)]
 
         async def call_model() -> dict[str, Any]:
@@ -180,16 +194,18 @@ class Worker:
                     tool = tools.get(block["name"])
                     if tool is None:
                         return {"output": f"Unknown tool: {block['name']}", "is_error": True}
-                    if tool.needs_approval:
+                    call = ToolCall(self.agent.id, run.id, index, event.subject, event.source)
+                    needs_approval = tool.needs_approval
+                    if callable(needs_approval):
+                        needs_approval = needs_approval(block["input"], call)
+                    if needs_approval:
                         approval = await self._request_approval(run, index, block)
                         if approval.status == ApprovalStatus.PENDING:
                             raise _Paused
                         if approval.status == ApprovalStatus.DENIED:
                             reason = f": {approval.reason}" if approval.reason else "."
                             return {"output": f"Denied by the user{reason}", "is_error": True}
-                    token = current_tool_call.set(
-                        ToolCall(self.agent.id, run.id, index, event.subject)
-                    )
+                    token = current_tool_call.set(call)
                     try:
                         return {"output": await tool.fn(block["input"]), "is_error": False}
                     except Exception as exc:

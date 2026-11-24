@@ -6,6 +6,8 @@ from double_agent.types import (
     ApprovalStatus,
     Event,
     EventStatus,
+    MemoryFile,
+    MemoryVersion,
     OutboxItem,
     OutboxStatus,
     Run,
@@ -160,6 +162,32 @@ class Storage(Protocol):
         """
         ...
 
+    async def list_memory(self, agent_id: str) -> list[MemoryFile]:
+        """Return the agent's current memory files, sorted by path."""
+        ...
+
+    async def read_memory(self, agent_id: str, path: str) -> str | None: ...
+
+    async def memory_op_result(self, op_id: str) -> str | None:
+        """Return the result recorded for a memory write, if `op_id` was already applied."""
+        ...
+
+    async def write_memory(
+        self,
+        agent_id: str,
+        changes: dict[str, str | None],
+        op_id: str,
+        result: str,
+        source: str,
+        run_id: str | None,
+    ) -> None:
+        """Apply file changes (None deletes) together, once per `op_id`, recording `result`."""
+        ...
+
+    async def memory_history(self, agent_id: str, path: str) -> list[MemoryVersion]:
+        """Every write to one path, oldest first."""
+        ...
+
     async def add_outbox_item(self, item: OutboxItem) -> bool:
         """Queue a message. Returns False if an item with its id is already queued."""
         ...
@@ -191,6 +219,8 @@ class InMemoryStorage:
         self._approvals: dict[str, Approval] = {}
         self._tasks: dict[tuple[str, str], TaskView] = {}
         self._task_ops: dict[str, tuple[str, str]] = {}
+        self._memory: list[MemoryVersion] = []
+        self._memory_ops: dict[str, str] = {}
 
     async def add_event(self, event: Event) -> bool:
         if event.idempotency_key in self._events:
@@ -388,3 +418,50 @@ class InMemoryStorage:
                 if timer.agent_id == agent_id and timer.subject == task_subject(task_id):
                     timer.status = TimerStatus.CANCELLED
         return view.model_copy(deep=True)
+
+    def _memory_now(self, agent_id: str) -> dict[str, MemoryVersion]:
+        latest: dict[str, MemoryVersion] = {}
+        for version in self._memory:
+            if version.agent_id == agent_id:
+                latest[version.path] = version
+        return {p: v for p, v in latest.items() if v.content is not None}
+
+    async def list_memory(self, agent_id: str) -> list[MemoryFile]:
+        return [
+            MemoryFile(path=p, size=len(v.content or ""), updated_at=v.at)
+            for p, v in sorted(self._memory_now(agent_id).items())
+        ]
+
+    async def read_memory(self, agent_id: str, path: str) -> str | None:
+        version = self._memory_now(agent_id).get(path)
+        return version.content if version else None
+
+    async def memory_op_result(self, op_id: str) -> str | None:
+        return self._memory_ops.get(op_id)
+
+    async def write_memory(
+        self,
+        agent_id: str,
+        changes: dict[str, str | None],
+        op_id: str,
+        result: str,
+        source: str,
+        run_id: str | None,
+    ) -> None:
+        if op_id in self._memory_ops:
+            return
+        for path, content in changes.items():
+            self._memory.append(
+                MemoryVersion(
+                    agent_id=agent_id,
+                    path=path,
+                    content=content,
+                    op_id=op_id,
+                    source=source,
+                    run_id=run_id,
+                )
+            )
+        self._memory_ops[op_id] = result
+
+    async def memory_history(self, agent_id: str, path: str) -> list[MemoryVersion]:
+        return [v.model_copy() for v in self._memory if v.agent_id == agent_id and v.path == path]

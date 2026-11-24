@@ -47,3 +47,15 @@ A task's items, statuses, notes and log are stored as rows in SQLite and shown t
 ## A run's task context is saved with the run
 
 When a run starts on a task, the task as it looked at that moment is saved as the run's first step. A resumed run replays that snapshot, so the model sees an unchanged conversation even if the task was updated in between.
+
+## Memory uses Anthropic's memory tool commands, not the native tool
+
+The `memory` tool has the commands, parameters and result strings of Anthropic's memory tool, so it behaves the way Claude expects, but it is defined as an ordinary tool. With the native tool, the API tells the model to view its memory before doing anything else, which would add model calls to every run. Instead, each run is shown the memory index up front.
+
+## Memory is knowledge, never permission
+
+Memory is shown to the agent as notes it gathered, not as instructions. Instructions come only from `/instructions.md`, which only the operator can write. Memory writes during runs started by untrusted sources (anything not in the agent's `trusted_sources`, `user` by default) wait for approval, so outside content such as an email can't plant lasting instructions. Any future "stop asking me" behaviour should be learned from the runtime's own record of approvals, not from notes the agent writes.
+
+## Every memory write is versioned
+
+Each write records the run, step and event source that made it, and earlier versions are kept, so you can see why the agent believes something and what it used to say.

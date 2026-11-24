@@ -3,6 +3,7 @@ from typing import Any
 from uuid import uuid4
 
 from double_agent.agent import Tool, current_tool_call
+from double_agent.safety import check_text
 from double_agent.storage import Storage
 from double_agent.types import (
     ItemStatus,
@@ -20,11 +21,6 @@ MAX_LOG_CHARS = 500
 LOG_ENTRIES_SHOWN = 30
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
-# Common credential formats. Memory is shown to the model on every run, so secrets stay out.
-_SECRET = re.compile(
-    r"sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}"
-    r"|xox[abpr]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-)
 
 
 def render_task(view: TaskView) -> str:
@@ -54,22 +50,13 @@ def render_task(view: TaskView) -> str:
     return "\n".join(lines)
 
 
-def _check_text(label: str, text: str | None, limit: int) -> None:
-    if text is None:
-        return
-    if len(text) > limit:
-        raise ValueError(f"{label} is {len(text)} characters; the limit is {limit}.")
-    if _SECRET.search(text):
-        raise ValueError(f"{label} looks like it contains a secret. Don't store credentials.")
-
-
 def _items(raw: list[dict[str, Any]]) -> list[TaskItem]:
     items = [TaskItem.model_validate(i) for i in raw]
     for item in items:
         if not _ID.match(item.key):
             raise ValueError(f"Item key {item.key!r} must be lowercase letters, digits and dashes.")
-        _check_text(f"Item {item.key}", item.description, MAX_LOG_CHARS)
-        _check_text(f"Item {item.key} note", item.note, MAX_LOG_CHARS)
+        check_text(f"Item {item.key}", item.description, MAX_LOG_CHARS)
+        check_text(f"Item {item.key} note", item.note, MAX_LOG_CHARS)
     if len({i.key for i in items}) != len(items):
         raise ValueError("Item keys must be unique.")
     return items
@@ -97,7 +84,7 @@ def task_tools(storage: Storage) -> list[Tool]:
         items = _items(input.get("items", []))
         if len(items) > MAX_ITEMS:
             raise ValueError(f"A task can have at most {MAX_ITEMS} items.")
-        _check_text("Goal", input.get("goal"), MAX_NOTES_CHARS)
+        check_text("Goal", input.get("goal"), MAX_NOTES_CHARS)
         task = Task(
             id=task_id, agent_id=call.agent_id, title=input["title"], goal=input.get("goal", "")
         )
@@ -119,11 +106,11 @@ def task_tools(storage: Storage) -> list[Tool]:
 
     async def update_task(input: dict[str, Any]) -> str:
         call = current_tool_call.get()
-        _check_text("Notes", input.get("notes"), MAX_NOTES_CHARS)
-        _check_text("Log entry", input.get("log"), MAX_LOG_CHARS)
+        check_text("Notes", input.get("notes"), MAX_NOTES_CHARS)
+        check_text("Log entry", input.get("log"), MAX_LOG_CHARS)
         changes = [ItemUpdate.model_validate(i) for i in input.get("items", [])]
         for change in changes:
-            _check_text(f"Item {change.key} note", change.note, MAX_LOG_CHARS)
+            check_text(f"Item {change.key} note", change.note, MAX_LOG_CHARS)
         update = TaskUpdate(
             items=changes,
             new_items=_items(input.get("new_items", [])),
